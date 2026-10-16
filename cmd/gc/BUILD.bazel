@@ -1579,6 +1579,7 @@ go_test(
         "pending_create_teardown_sites_test.go",
         "pending_create_unattributed_teardown_test.go",
         "pending_interaction_lane_test.go",
+        "pending_question_hold_test.go",
         "per_dispatch_model_test.go",
         "phase2_real_transport_deadline_test.go",
         "phase2_real_transport_test.go",

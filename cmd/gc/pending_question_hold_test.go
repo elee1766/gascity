@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,10 @@ func TestPollerHoldsQueuedNudgeWhileQuestionInteractionPending(t *testing.T) {
 	idleSince := time.Now().Add(-45 * time.Minute) // question drawn, then nothing
 	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
 	fake.SetPendingInteraction(info.SessionName, questionInteraction())
+	// A running session's handle is runtime-only, so the provider is what
+	// refuses the typed text; runtime.Fake does not, so it stands in for the
+	// tmux refusal (the tmux tests prove that provider refuses a question).
+	fake.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("%w: %s is waiting on a question dialog", runtime.ErrPendingInteraction, info.SessionName)}
 	fake.Calls = nil
 
 	target := nudgeTarget{
@@ -76,11 +81,6 @@ func TestPollerHoldsQueuedNudgeWhileQuestionInteractionPending(t *testing.T) {
 		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
 	}
 
-	for _, call := range fake.Calls {
-		if call.Method == "Nudge" || call.Method == "NudgeNow" {
-			t.Errorf("typed %q into a pane with an open question dialog", call.Message)
-		}
-	}
 	if delivered {
 		t.Error("delivered = true, want false while the question is pending")
 	}

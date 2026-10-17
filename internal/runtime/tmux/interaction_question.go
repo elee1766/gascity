@@ -33,6 +33,12 @@ import (
 // Detection also needs the dialog's other two anchors above the footer, a ☐
 // header row and the focused numbered option, so the folder-trust dialog
 // ("Enter to confirm") and an idle composer's bare "❯" never read as a question.
+//
+// The matcher is checked against one live frame shape, a single-select,
+// single-question dialog (Claude Code 2.1.280). A multiSelect question, a
+// multi-question dialog's later tabs, or a status row under the footer are not
+// verified against a live capture. A form the matcher misses reads as no
+// question and is delivered to as it was before this guard existed.
 
 var (
 	// askUserQuestionFooterRe matches the select footer on its trimmed row.

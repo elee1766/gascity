@@ -853,17 +853,10 @@ func TestNotifyBeadsGHStubRunsUnderBSDTools(t *testing.T) {
 	gh.write(gh.statuses, "204\n500\n")
 	input := filepath.Join(t.TempDir(), "payload.json")
 	gh.write(input, `{"event_type":"x"}`)
-	env := os.Environ()
-	for k, v := range gh.env() {
-		if k == "PATH" {
-			v = bsd + string(os.PathListSeparator) + v
-		}
-		env = append(env, k+"="+v)
-	}
+	env := gh.env()
+	env["PATH"] = bsd + string(os.PathListSeparator) + env["PATH"]
 	for i, wantOK := range []bool{true, false} {
-		cmd := exec.Command(filepath.Join(gh.bin, "gh"), "api", "--include", "--method", "POST", "repos/o/r/dispatches", "--input", input)
-		cmd.Env = env
-		out, err := cmd.CombinedOutput()
+		out, err := runWorkflowStepScript(t, t.TempDir(), "gh api --include --method POST repos/o/r/dispatches --input '"+input+"'\n", env)
 		if (err == nil) != wantOK {
 			t.Fatalf("call %d: exit %v, want success %v\n%s", i+1, err, wantOK, out)
 		}

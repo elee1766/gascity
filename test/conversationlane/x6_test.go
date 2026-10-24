@@ -48,17 +48,16 @@ const (
 // x6DrainOver bounds the stream's last injection. Its notices arrive after
 // the previous Take, while the runtime is busy, and the producers usually
 // stop before its boundary comes: then no ring serves it, and the lane host
-// finds the boundary on doorbells not timed to it (its busy re-probe,
-// laneBusyFirst = 2 s, DES-O1 §4.3, after the last ring and every 2 s after
-// that; the anti-entropy scan; a ledger-feed poke). So it lands up to one
-// re-probe period after the boundary, by where the stream ended within the
-// cycle, which host speed moves. On rbe-west (2026-10-24, 3-4 runs at each
-// of 380-400 notices) its notices waited up to 0.5 s or 1.5-1.9 s longer
-// than the rest's longest wait, in about half the runs each. They may wait
-// one re-probe period, plus a second for that pass, longer than the rest;
-// with the rest at x6SteadyMax that allows up to 10 s. A re-probe timed to
-// the predicted boundary (ga-ylpbsy.51.6) would let the p99 cover them
-// again.
+// wakes itself. A boundary whose only reason to be closed is the quiescence
+// window names its deadline (opjournal.Probe.BoundaryAt, the last activity
+// plus 3 s), and the wake is timed to it. The polling grid (its busy
+// re-probe, laneBusyFirst = 2 s, DES-O1 §4.3, after the last ring and every
+// 2 s after that; the anti-entropy scan; a ledger-feed poke) is the
+// fallback, for a boundary that names no deadline, and a wake the host
+// serves late lands up to one re-probe period after the boundary, by where
+// the stream ended within the cycle, which host speed moves. The bound lets
+// these notices wait one re-probe period, plus a second for that pass,
+// longer than the rest; with the rest at x6SteadyMax that allows up to 10 s.
 const x6DrainOver = 2*time.Second + time.Second
 
 // x6MinGap is the least spacing of two injections: the quiescence window,

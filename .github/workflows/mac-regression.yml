@@ -340,8 +340,10 @@ jobs:
           ACCEPTANCE_TIMEOUT: 20m
         run: make test-acceptance-go
       - name: Run external bd CLI contract
+        if: ${{ !cancelled() }}
         run: make test-bd-cli-contract
       - name: Run external bd CLI contract HOME isolation
+        if: ${{ !cancelled() }}
         run: make test-bd-cli-contract-home-isolation
 
   # Unit coverage pass — the Linux `Check` job's equivalent of
@@ -391,9 +393,6 @@ jobs:
     needs:
       - runner-policy
       - gate
-      - mac-quality
-      - mac-unit
-      - mac-acceptance
     if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
@@ -455,9 +454,6 @@ jobs:
     needs:
       - runner-policy
       - gate
-      - mac-quality
-      - mac-unit
-      - mac-acceptance
     if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 60
@@ -496,9 +492,6 @@ jobs:
     needs:
       - runner-policy
       - gate
-      - mac-quality
-      - mac-unit
-      - mac-acceptance
     if: needs.gate.outputs.run_full == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
@@ -563,9 +556,6 @@ jobs:
     needs:
       - runner-policy
       - gate
-      - mac-quality
-      - mac-unit
-      - mac-acceptance
     if: needs.gate.outputs.run_review_formulas == 'true'
     runs-on: ${{ needs.runner-policy.outputs.runner_macos }}
     timeout-minutes: 90

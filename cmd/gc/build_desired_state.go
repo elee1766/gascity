@@ -3767,7 +3767,7 @@ func ensureDependencyOnlyTemplate(
 	// path above and realizePoolDesiredSessions. Otherwise GC_ALIAS can
 	// oscillate across ticks and trigger the reconciler's config-drift drain
 	// on the live dependency-floor session.
-	resolveAgent, resolveQN, _ := poolDesiredRequestIdentity(cfgAgent, slot)
+	resolveAgent, resolveQN, _ := existingPoolSessionIdentity(cfgAgent, slot, sessionBeadAgentNameInfo(sbInfo))
 	fpExtra := buildFingerprintExtra(resolveAgent)
 	tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, resolveQN, fpExtra, sbInfo)
 	if err != nil {
@@ -4068,10 +4068,13 @@ func realizePoolDesiredSessionsAt(
 			qualifiedInstance string
 			poolSlot          int
 		)
-		if manualSession {
+		switch {
+		case manualSession:
 			qualifiedInstance = sessionBeadQualifiedNameInfo(bp.cityPath, cfgAgent, bp.rigs, sbInfo)
 			resolveAgent = sessionBeadConfigAgent(cfgAgent, qualifiedInstance)
-		} else {
+		case item.plan == nil:
+			resolveAgent, qualifiedInstance, poolSlot = existingPoolSessionIdentity(cfgAgent, slot, sessionBeadAgentNameInfo(sbInfo))
+		default:
 			resolveAgent, qualifiedInstance, poolSlot = poolDesiredRequestIdentity(cfgAgent, slot)
 		}
 		// Bind using this item's own per-slot qualifiedInstance, not the base
@@ -4541,6 +4544,41 @@ func poolDesiredRequestIdentity(cfgAgent *config.Agent, slot int) (*config.Agent
 	return &instanceAgent, qualifiedInstance, slot
 }
 
+// existingPoolSessionIdentity is poolDesiredRequestIdentity for a session that
+// already exists. A namepool member keeps the themed name it was created
+// under (its persisted agent_name) after that name leaves namepool_names, so
+// a namepool change never renames a live session's alias, GC_AGENT or work
+// dir onto the slot's new name. Only newly allocated sessions take new names.
+func existingPoolSessionIdentity(cfgAgent *config.Agent, slot int, persistedAgentName string) (*config.Agent, string, int) {
+	if retained, qualifiedInstance, ok := retainedNamepoolIdentity(cfgAgent, persistedAgentName); ok {
+		return retained, qualifiedInstance, slot
+	}
+	return poolDesiredRequestIdentity(cfgAgent, slot)
+}
+
+// retainedNamepoolIdentity reports the instance agent and qualified identity
+// for a persisted namepool member name that the current namepool no longer
+// lists. Names still in the pool resolve through their slot as before.
+func retainedNamepoolIdentity(cfgAgent *config.Agent, persistedAgentName string) (*config.Agent, string, bool) {
+	if cfgAgent == nil || len(cfgAgent.NamepoolNames) == 0 || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return nil, "", false
+	}
+	qualified := normalizeSessionBeadQualifiedName(cfgAgent, persistedAgentName)
+	if qualified == "" || qualified == cfgAgent.QualifiedName() {
+		return nil, "", false
+	}
+	if resolvePersistedPoolIdentitySlot(cfgAgent, true, qualified) > 0 {
+		return nil, "", false
+	}
+	prefix := cfgAgent.QualifiedInstanceName("")
+	instanceName, ok := strings.CutPrefix(qualified, prefix)
+	if !ok || instanceName == "" || strings.ContainsAny(instanceName, "/.") {
+		return nil, "", false
+	}
+	instanceAgent := deepCopyAgent(cfgAgent, instanceName, cfgAgent.Dir)
+	return &instanceAgent, qualified, true
+}
+
 // staleNonExpandingPoolSessionBeadInfo is the session.Info mirror of
 // staleNonExpandingPoolSessionBead: it resolves the same non-expanding
 // singleton-pool identity from typed Info fields (agent_name/label fallback via
@@ -4694,7 +4732,7 @@ func canonicalSessionIdentityWithConfig(cfg *config.City, cfgAgent *config.Agent
 	if slot <= 0 {
 		return cfgAgent, cfgAgent.QualifiedName()
 	}
-	instanceAgent, qualifiedInstance, _ := poolDesiredRequestIdentity(cfgAgent, slot)
+	instanceAgent, qualifiedInstance, _ := existingPoolSessionIdentity(cfgAgent, slot, sessionBeadAgentName(bead))
 	return instanceAgent, qualifiedInstance
 }
 
@@ -4726,7 +4764,7 @@ func canonicalSessionIdentityWithConfigInfo(cfg *config.City, cfgAgent *config.A
 	if slot <= 0 {
 		return cfgAgent, cfgAgent.QualifiedName()
 	}
-	instanceAgent, qualifiedInstance, _ := poolDesiredRequestIdentity(cfgAgent, slot)
+	instanceAgent, qualifiedInstance, _ := existingPoolSessionIdentity(cfgAgent, slot, sessionBeadAgentNameInfo(info))
 	return instanceAgent, qualifiedInstance
 }
 

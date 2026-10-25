@@ -520,7 +520,7 @@ func newTemplateResolver(bp *agentBuildParams) templateResolver {
 		}
 		if slot, _ := strconv.Atoi(strings.TrimSpace(info.PoolSlot)); (slot > 0 || agent.UsesCanonicalSingletonPoolIdentity()) && info.PoolManaged && !isManualSessionInfoForAgent(info, agent) {
 			// A wanted pool seat: legacy's realize path (realizePoolDesiredSessions).
-			resolveAgent, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(agent, slot)
+			resolveAgent, qualifiedInstance, poolSlot := existingPoolSessionIdentity(agent, slot, sessionBeadAgentNameInfo(info))
 			tp, err := resolveTemplateForSessionBeadInfo(&row, resolveAgent, qualifiedInstance, buildFingerprintExtra(resolveAgent), info)
 			if err == nil {
 				applyPoolInstanceIdentity(&tp, agent, qualifiedInstance, poolSlot, info)

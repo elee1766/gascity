@@ -14674,3 +14674,61 @@ func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) 
 		})
 	}
 }
+
+// A namepool change must not rename a live member. Real case: after the
+// gastown.polecat namepool was replaced, session 16757e57 (agent_name
+// trade/gastown.furiosa, pool_slot 1) was re-aliased to slot 1's new name
+// trade/gastown.aelia and given the aelia work dir.
+func TestBuildDesiredState_NamepoolChangeKeepsExistingMemberIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	agent := config.Agent{
+		Name:              "polecat",
+		Dir:               "trade",
+		BindingName:       "gastown",
+		StartCommand:      "true",
+		MaxActiveSessions: intPtr(4),
+		NamepoolNames:     []string{"furiosa", "nux"},
+		ScaleCheck:        "printf 1",
+	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{agent}}
+	first := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(first.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1", len(first.State))
+	}
+	for _, tp := range first.State {
+		if tp.InstanceName != "trade/gastown.furiosa" {
+			t.Fatalf("initial InstanceName = %q, want trade/gastown.furiosa", tp.InstanceName)
+		}
+	}
+
+	agent.NamepoolNames = []string{"aelia", "balbus"}
+	cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{agent}}
+	second := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(second.State) != 1 {
+		t.Fatalf("desired sessions after namepool change = %d, want 1", len(second.State))
+	}
+	for _, tp := range second.State {
+		if tp.InstanceName != "trade/gastown.furiosa" || tp.Alias != "trade/gastown.furiosa" {
+			t.Fatalf("after namepool change InstanceName=%q Alias=%q, want both trade/gastown.furiosa", tp.InstanceName, tp.Alias)
+		}
+		if got := tp.Env["GC_AGENT"]; got != "" && got != "trade/gastown.furiosa" {
+			t.Fatalf("GC_AGENT = %q, want trade/gastown.furiosa", got)
+		}
+		if strings.Contains(tp.WorkDir, "aelia") {
+			t.Fatalf("WorkDir = %q moved to the slot's new name", tp.WorkDir)
+		}
+	}
+
+	cfgAgent := &cfg.Agents[0]
+	bead := beads.Bead{Labels: []string{"agent:trade/gastown.furiosa"}, Metadata: map[string]string{
+		"template": "trade/gastown.polecat", "agent_name": "trade/gastown.furiosa", "alias": "trade/gastown.aelia",
+		"pool_slot": "1", "pool_managed": "true", "session_name": "gastown__polecat-gcg-session-16757e57",
+	}}
+	if _, qn := canonicalSessionIdentityWithConfig(cfg, cfgAgent, bead); qn != "trade/gastown.furiosa" {
+		t.Fatalf("canonical identity = %q, want trade/gastown.furiosa", qn)
+	}
+	if _, qn, _ := poolDesiredRequestIdentity(cfgAgent, 2); qn != "trade/gastown.balbus" {
+		t.Fatalf("new slot 2 identity = %q, want trade/gastown.balbus", qn)
+	}
+}

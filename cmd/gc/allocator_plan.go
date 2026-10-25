@@ -483,7 +483,7 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 		ref.Alias = strings.TrimSpace(info.Alias)
 		ref.InstanceName = firstNonEmpty(ref.QualifiedInstance, info.SessionNameMetadata)
 	} else {
-		resolveAgent, ref.QualifiedInstance, ref.PoolSlot = poolDesiredRequestIdentity(cfgAgent, slot)
+		resolveAgent, ref.QualifiedInstance, ref.PoolSlot = existingPoolSessionIdentity(cfgAgent, slot, sessionBeadAgentNameInfo(info))
 		ref.ResolveKind = resolveInstance
 		if ref.PoolSlot == 0 {
 			ref.ResolveKind = resolveBase

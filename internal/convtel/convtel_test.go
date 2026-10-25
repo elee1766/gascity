@@ -370,6 +370,26 @@ func TestExporterOutageNeverBlocks(t *testing.T) {
 	}
 }
 
+func TestExporterRefusesCollectorRedirect(t *testing.T) {
+	c, destination := newCollector(t)
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(redirect.Close)
+	e := NewExporter(Config{BaseURL: redirect.URL}, nil)
+	e.EmitLog(LogRecord{Time: time.Now(), Event: "conversation.prompt", Body: "local-only content"})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := e.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.posts != 0 || e.Stats().Exported != 0 || e.Stats().Failed != 1 {
+		t.Fatalf("redirect leaked content: destination posts=%d stats=%+v", c.posts, e.Stats())
+	}
+}
+
 func TestFieldSizeCap(t *testing.T) {
 	c, srv := newCollector(t)
 	e := NewExporter(Config{BaseURL: srv.URL, MaxFieldBytes: 64, FlushInterval: time.Millisecond}, nil)

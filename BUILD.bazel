@@ -397,6 +397,7 @@ filegroup(
         "//internal/connect:bazel_repo_srcs",
         "//internal/connect/tokenrender:bazel_repo_srcs",
         "//internal/convergence:bazel_repo_srcs",
+        "//internal/convtel:bazel_repo_srcs",
         "//internal/convoy:bazel_repo_srcs",
         "//internal/coordclass:bazel_repo_srcs",
         "//internal/credentialprovider:bazel_repo_srcs",

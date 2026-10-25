@@ -44,7 +44,7 @@ func TestACPProtocolTurnEventsInterruptCancels(t *testing.T) {
 	}
 	completed := expectTurnPair(t, ch, s.name, turnProtocolSessionID)
 	if completed.Status != runtime.TurnStatusCancelled || completed.StopReason != acpWireCancelled || completed.Error != "" {
-		t.Fatalf("completed = %+v, want cancelled", completed)
+		t.Fatalf("completed = %+v, want canceled", completed)
 	}
 }
 

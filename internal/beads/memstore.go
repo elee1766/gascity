@@ -22,6 +22,13 @@ type MemStore struct {
 	deps  []Dep
 	seq   int
 
+	// lastCreatedAt is the newest creation stamp this store has issued or
+	// loaded; nextCreatedAtLocked stamps every create strictly after it.
+	lastCreatedAt time.Time
+	// now is the wall clock creation stamps read; nil reads memStoreWallClock.
+	// Tests freeze it to model a clock too coarse to tell creates apart.
+	now func() time.Time
+
 	// storageOnly marks a MemStore serving as another store's storage (the
 	// native store's test double): it reports no session writes, which the
 	// store above it reports, so each write is reported once.
@@ -80,7 +87,7 @@ func NewMemStoreFrom(seq int, existing []Bead, deps []Dep) *MemStore {
 	copy(b, existing)
 	d := make([]Dep, len(deps))
 	copy(d, deps)
-	return &MemStore{seq: seq, beads: b, deps: d}
+	return &MemStore{seq: seq, beads: b, deps: d, lastCreatedAt: newestCreatedAt(time.Time{}, b)}
 }
 
 // restoreFrom replaces the in-memory state with the given snapshot.
@@ -91,6 +98,7 @@ func (m *MemStore) restoreFrom(seq int, beads []Bead, deps []Dep) {
 	m.seq = seq
 	m.beads = beads
 	m.deps = deps
+	m.lastCreatedAt = newestCreatedAt(m.lastCreatedAt, beads)
 }
 
 // snapshot returns the current sequence counter, a deep copy of all beads, and
@@ -157,7 +165,7 @@ func (m *MemStore) Create(b Bead) (Bead, error) {
 	if b.Type == "" {
 		b.Type = "task"
 	}
-	b.CreatedAt = time.Now().Round(0)
+	b.CreatedAt = m.nextCreatedAtLocked()
 	b.UpdatedAt = b.CreatedAt
 	b.Revision = 1   // first version; every subsequent mutation bumps it
 	b.ClaimFence = 0 // no ownership history yet; the first claim bumps it to 1
@@ -806,4 +814,42 @@ func (m *MemStore) noteSession(b Bead, kvs map[string]string) {
 	if !m.storageOnly {
 		noteSessionKeys(b, kvs)
 	}
+}
+
+// memStoreWallClock is the clock a MemStore without its own now reads.
+var memStoreWallClock = time.Now
+
+// nextCreatedAtLocked returns the creation stamp for a new bead: the wall
+// clock, or one nanosecond past the newest stamp when the clock has not moved
+// past it. Readers order beads by (CreatedAt, ID) and take that as creation
+// order, but a wall clock ties for creates in one tick (macOS reads
+// microseconds) and neither minted ids (gc-10 < gc-9) nor pinned ids sort by
+// creation, so the stamps themselves must be strictly increasing. A stamp
+// runs ahead of the clock only by one nanosecond per create within a tick (or
+// by a backward clock step), and tracks the clock again once it moves past.
+// The caller holds m.mu.
+func (m *MemStore) nextCreatedAtLocked() time.Time {
+	clock := memStoreWallClock
+	if m.now != nil {
+		clock = m.now
+	}
+	stamp := clock().Round(0)
+	if !stamp.After(m.lastCreatedAt) {
+		stamp = m.lastCreatedAt.Add(time.Nanosecond)
+	}
+	m.lastCreatedAt = stamp
+	return stamp
+}
+
+// newestCreatedAt returns the later of floor and every bead's CreatedAt, so a
+// store loaded from (or reloaded to) persisted beads stamps its next create
+// after all of them, including ones another process wrote in the same tick.
+func newestCreatedAt(floor time.Time, beads []Bead) time.Time {
+	newest := floor
+	for _, b := range beads {
+		if b.CreatedAt.After(newest) {
+			newest = b.CreatedAt
+		}
+	}
+	return newest
 }

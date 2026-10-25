@@ -14,13 +14,13 @@ import (
 func TestReleaseOrphanedPoolAssignments_ReleasesDeadOwnerSource(t *testing.T) {
 	graph := beads.NewMemStore()
 	rig := beads.NewMemStore()
-	const dead = "trade/gastown.nux"
+	const dead = "worker-dead"
 
 	held, err := rig.Create(beads.Bead{Title: "source", Assignee: dead, Labels: []string{beadmeta.HoldExternalLabel},
 		Metadata: map[string]string{workLeaseExpiresMetadataKey: "2026-10-25T07:00:00Z"}})
 	requireNoError(t, err)
 	requireNoError(t, rig.Update(held.ID, beads.UpdateOpts{Status: stringPtr("blocked")}))
-	other, err := rig.Create(beads.Bead{Title: "other owner", Assignee: "trade/gastown.furiosa"})
+	other, err := rig.Create(beads.Bead{Title: "other owner", Assignee: "worker-live"})
 	requireNoError(t, err)
 	requireNoError(t, rig.Update(other.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}))
 	conv, err := rig.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
@@ -57,7 +57,7 @@ func TestReleaseOrphanedPoolAssignments_ReleasesDeadOwnerSource(t *testing.T) {
 	if got.Metadata[sourceReclaimedFromMetadataKey] != dead || got.Metadata[sourceReclaimedByMetadataKey] != step.ID {
 		t.Fatalf("missing reclaim note: %v", got.Metadata)
 	}
-	if o, _ := rig.Get(other.ID); o.Assignee != "trade/gastown.furiosa" || o.Status != "in_progress" {
+	if o, _ := rig.Get(other.ID); o.Assignee != "worker-live" || o.Status != "in_progress" {
 		t.Fatalf("other owner's source changed: %+v", o)
 	}
 	// Idempotent: a second pass over the already-released source is a no-op.

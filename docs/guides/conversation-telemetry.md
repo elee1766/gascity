@@ -29,7 +29,7 @@ Reasoning: only `agent_thought_chunk` blocks the provider sends over ACP are exp
 - Destination must be loopback (`127.0.0.1`, `::1`, `localhost`). Other hosts and URLs with credentials are rejected and export stays disabled.
 - Redaction runs before any record or span is queued: secret-named JSON keys, values of secret-named env vars in the session's launch env, and credential patterns (PEM private keys, bearer/authorization headers, JWTs, `sk-`/`ghp_`/`github_pat_`/`glpat-`/`xox?-`/AWS/Google keys, URL userinfo, `password=`-style assignments). Surrounding text is kept.
 - The process environment is never exported. Credential files are never read.
-- Each text field is capped at `GC_CONVERSATION_MAX_FIELD_BYTES` with an explicit `…[truncated N bytes]` marker.
+- Each text field is capped at `GC_CONVERSATION_MAX_FIELD_BYTES` with an explicit `…[gc truncated N bytes]` marker.
 
 ## Delivery semantics
 

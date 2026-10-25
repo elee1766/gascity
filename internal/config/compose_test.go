@@ -2996,3 +2996,51 @@ upstream = "groq-prod"
 	}
 	t.Error("worker agent not found")
 }
+
+func TestLoadWithIncludes_RootPatchNamepoolLoadsNames(t *testing.T) {
+	dir := t.TempDir()
+	writeFile := func(rel, data string) {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeFile("city.toml", `
+[workspace]
+name = "test"
+includes = ["packs/base"]
+
+[[patches.agent]]
+name = "worker"
+namepool = "names.txt"
+`)
+	writeFile("packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+`)
+	writeFile("names.txt", "alpha\nbravo\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	agents := explicitAgents(cfg.Agents)
+	if len(agents) != 1 {
+		t.Fatalf("len(explicit agents) = %d, want 1", len(agents))
+	}
+	if agents[0].Namepool != "names.txt" {
+		t.Fatalf("Namepool = %q, want names.txt", agents[0].Namepool)
+	}
+	if got := strings.Join(agents[0].NamepoolNames, ","); got != "alpha,bravo" {
+		t.Fatalf("NamepoolNames = %q, want alpha,bravo", got)
+	}
+}

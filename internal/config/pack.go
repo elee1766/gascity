@@ -2372,6 +2372,10 @@ func adjustPackPatchPaths(patches *PackPatches, topoDir, cityRoot string) {
 			v := adjustFragmentPath(*p.PromptTemplate, topoDir, cityRoot)
 			p.PromptTemplate = &v
 		}
+		if p.Namepool != nil && *p.Namepool != "" {
+			v := adjustFragmentPath(*p.Namepool, topoDir, cityRoot)
+			p.Namepool = &v
+		}
 		if p.OverlayDir != nil && *p.OverlayDir != "" {
 			v := adjustFragmentPath(*p.OverlayDir, topoDir, cityRoot)
 			p.OverlayDir = &v

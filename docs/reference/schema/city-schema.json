@@ -799,6 +799,10 @@
           "type": "string",
           "description": "PromptTemplate overrides the prompt template path.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
+        "namepool": {
+          "type": "string",
+          "description": "Namepool overrides the namepool file path (one name per line).\nRelative paths resolve like PromptTemplate."
+        },
         "session": {
           "type": "string",
           "description": "Session overrides the session transport (\"acp\" or \"tmux\")."

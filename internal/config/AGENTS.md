@@ -15,6 +15,10 @@ keep already-owned workflow anchors available for continuation. Update the
 shell count and Go predicates together; otherwise an unclaimable latch can
 continually wake replacement workers.
 
+Apply worker candidate limits after topology filtering and executable-work
+preference, including the legacy routing probe. A bounded raw read can contain
+only structural roots while the unlimited demand count still sees ready work.
+
 For `sqlite-work`, generated recovery hooks must use `gc ready` and guarded
 `gc bd update --if-assignee --if-status`, not a raw `bd` subprocess. Preserve
 the provider-independent user override and the existing bd recovery scripts.

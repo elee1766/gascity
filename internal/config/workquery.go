@@ -448,7 +448,7 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`r=$(` + routedReadyTierCommand(topo) + `)` + workQueryReadFailure(reader) + `; ` +
 		preferExecutablePoolDemandScript() +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=0", topo) + `)` + workQueryReadFailure(reader) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		legacyEphemeralPoolDemandFromSnapshotShell("legacy_ephemeral_candidates", 20, topo) +
@@ -474,29 +474,17 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 func preferExecutablePoolDemandScript() string {
 	predicate := graphWorkflowAnchorJQPredicate()
 	preferJQ := `[.[] | ` + executableWorkflowTopologyJQ() + `]` +
-		` | [.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]`
+		` | ([.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]) | .[:20]`
 	return `gc_preferred_pool_demand=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(preferJQ) + ` 2>/dev/null); ` +
 		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
 }
 
 func routedReadyTierCommand(topo QueryTopology) string {
-	// The shared predicate stays order-free so the count-form does no wasted
-	// sorting; the worker first-row path rides the reader's canonical
-	// (priority, created_at, id) default order — both readers default to it
-	// (bd ready's default --sort priority; the federated reader's merged
-	// beads.SortBeadsReadyOrder). An explicit --sort oldest here makes the
-	// claim window priority-blind: a routed P0 behind more than --limit older
-	// lower-priority rows is never served at all, so pool workers
-	// deterministically starve the highest-priority routed work (measured on a
-	// live 14-seat city, 2026-08-25: 13 P0 rows parked behind 34 older wave
-	// rows — the bounded window contained zero P0s until the older rows
-	// drained). FIFO fairness survives within a priority band via the
-	// created_at term. The tier stays widened past a single row (limit=20, not
-	// limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
-	// routed work behind it to fall through to instead of idle-exiting; the
-	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
-	// the result.
-	return bdReadyPoolDemandShell("--limit=20", topo)
+	// Preserve the reader's canonical (priority, created_at, id) order.
+	// Read all routed rows before filtering: structural workflow latches can
+	// fill an entire reader window and hide executable work from the worker.
+	// preferExecutablePoolDemandScript bounds the eligible candidates to 20.
+	return bdReadyPoolDemandShell("--limit=0", topo)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts

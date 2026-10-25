@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -44,6 +45,88 @@ prefix = "wrk"
 		t.Fatal(err)
 	}
 	return city, rig, cfg
+}
+
+func TestSQLiteWorkHookClaimsBeyondWorkflowLatches(t *testing.T) {
+	for _, routeKey := range []string{"gc.routed_to", "gc.run_target"} {
+		t.Run(routeKey, func(t *testing.T) {
+			city, rig, _ := sqliteWorkTestCity(t)
+			t.Setenv("HOME", t.TempDir())
+			path := filepath.Join(city, "city.toml")
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = append(body, []byte("\n[[agent]]\nname = \"worker\"\n")...)
+			if err := os.WriteFile(path, body, 0600); err != nil {
+				t.Fatal(err)
+			}
+			for _, scope := range []string{city, rig} {
+				if err := initSQLiteWorkScope(scope, city); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store, err := openSQLiteWorkScope(city, city, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := store.CloseStore(); err != nil {
+					t.Error(err)
+				}
+			})
+			for i := 0; i < 20; i++ {
+				priority := 1
+				_, err := store.Create(beads.Bead{
+					Title: fmt.Sprintf("expanded workflow %d", i), Priority: &priority,
+					Metadata: map[string]string{routeKey: "worker", "gc.kind": "workflow", "gc.workflow_expanded": "true"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			metadata := map[string]string{routeKey: "worker"}
+			if routeKey == "gc.run_target" {
+				metadata["gc.kind"] = "workflow"
+			}
+			next, err := store.Create(beads.Bead{Title: "next executable work", Metadata: metadata})
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous, err := store.Create(beads.Bead{Title: "previous step", Assignee: "worker", Status: "in_progress"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(previous.ID); err != nil {
+				t.Fatal(err)
+			}
+			gc := reexecGCTestBinaryForTests(t)
+			t.Setenv("PATH", filepath.Dir(gc)+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("GC_AGENT", "worker")
+			t.Setenv("GC_BEADS", "sqlite-work")
+			t.Setenv("GC_ALIAS", "worker")
+			t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
+			t.Setenv("GC_NO_API", "1")
+			cmd := exec.Command(gc, "hook", "--claim", "--json")
+			cmd.Dir = city
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("claim after closing previous step: %v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("decode hook result: %v: %s", err, stdout.String())
+			}
+			if result.BeadID != next.ID {
+				t.Fatalf("claimed %q, want executable work %q: %+v", result.BeadID, next.ID, result)
+			}
+			claimed, err := store.Get(next.ID)
+			if err != nil || claimed.Status != "in_progress" || claimed.Assignee != "worker" {
+				t.Fatalf("claim was not persisted: %+v, %v", claimed, err)
+			}
+		})
+	}
 }
 
 func TestSQLiteWorkCLIAndHookRoundTrip(t *testing.T) {

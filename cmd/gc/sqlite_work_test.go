@@ -122,6 +122,58 @@ func TestSQLiteWorkCLIAndHookRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSQLiteWorkControllerRigLifecycle(t *testing.T) {
+	city, rig, cfg := sqliteWorkTestCity(t)
+	if err := startBeadsLifecycleResolvingCityDatabase(city, cfg, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	work, err := openSQLiteWorkScope(rig, city, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := work.Create(beads.Bead{Title: "controller native work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := work.CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+	cs := &controllerState{cityPath: city, cfg: cfg, cacheCtx: context.Background()}
+	stores := cs.buildStores(cfg)
+	store := stores["rig"]
+	if store == nil {
+		t.Fatal("controller omitted the native rig store")
+	}
+	defer closeBeadStoreHandle(store) //nolint:errcheck
+	if got, err := store.Get(ticket.ID); err != nil || got.Title != ticket.Title {
+		t.Fatalf("controller cannot read native work: %+v, %v", got, err)
+	}
+	claimer, ok := store.(interface {
+		Claim(string, string) (beads.Bead, bool, error)
+	})
+	if !ok {
+		t.Fatal("controller store does not expose atomic claims")
+	}
+	claimed, won, err := claimer.Claim(ticket.ID, "controller-worker")
+	if err != nil || !won || claimed.Assignee != "controller-worker" {
+		t.Fatalf("controller cannot claim native work: %+v, %t, %v", claimed, won, err)
+	}
+	if err := closeBeadStoreHandle(store); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(sqliteWorkDir(rig), "beads.sqlite")
+	if err := os.Rename(path, path+".saved"); err != nil {
+		t.Fatal(err)
+	}
+	unavailable := cs.openRigStore(sqliteWorkProvider, "rig", rig, "wrk", cfg)
+	if _, err := unavailable.List(beads.ListQuery{}); err == nil || !strings.Contains(err.Error(), "sqlite-work") {
+		t.Fatalf("missing native ledger did not fail closed: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("controller recreated missing native ledger: %v", err)
+	}
+}
+
 func TestSQLiteWorkKeepsInfrastructureBindingAcrossRestart(t *testing.T) {
 	city, rig, cfg := sqliteWorkTestCity(t)
 	if err := startBeadsLifecycleResolvingCityDatabase(city, cfg, &bytes.Buffer{}, nil); err != nil {

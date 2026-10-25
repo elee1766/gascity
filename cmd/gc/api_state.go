@@ -641,6 +641,13 @@ func (cs *controllerState) setBeadsQuiescent(quiescent bool) {
 // openRigStore creates a bead store for a rig path using the given provider.
 func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string, cfg *config.City) beads.Store {
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
+	if provider == sqliteWorkProvider {
+		store, err := openSQLiteWorkScope(scopeRoot, cs.cityPath, false)
+		if err != nil {
+			return unavailableStore{err: fmt.Errorf("open native rig store %s: %w", scopeRoot, err)}
+		}
+		return wrapStoreWithBeadPolicies(store, cfg)
+	}
 	openExecStore := func() (beads.Store, error) {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
 		env := gcExecStoreEnv(cs.cityPath, execStoreTarget{

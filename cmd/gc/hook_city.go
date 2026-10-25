@@ -125,5 +125,8 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.EmitWorkStartedUnrecorded = func(sessionID, template, beadID string, cause error) {
 		emitWorkStartedUnrecordedTo(h.recorder(), sessionID, template, beadID, cause)
 	}
+	if h.cfg != nil && h.cfg.Beads.Provider == sqliteWorkProvider {
+		return h.withSQLiteWorkClaimOps(ops)
+	}
 	return ops
 }

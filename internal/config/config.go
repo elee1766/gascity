@@ -1417,7 +1417,8 @@ func (w *Workspace) EffectiveSuspendedOnStart() bool {
 // BeadsConfig holds bead store settings.
 type BeadsConfig struct {
 	// Provider selects the bead store backend: "bd" (default, Dolt-backed),
-	// "file", or "exec:<script>" for a user-supplied script. The "sqlite",
+	// "file", "sqlite-work" for native scope-local SQLite, or "exec:<script>"
+	// for a user-supplied script. The "sqlite",
 	// "sqlite-cgo", and "coordstore" coordination-store providers were removed
 	// and now hard-error; migrate to "doltlite" or remove the setting.
 	Provider string `toml:"provider,omitempty" jsonschema:"default=bd"`

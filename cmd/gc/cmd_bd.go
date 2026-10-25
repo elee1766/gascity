@@ -547,6 +547,9 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	if code, handled := maybeRouteBdByID(cityPath, rigName, bdArgs, stdout, stderr); handled {
 		return code
 	}
+	if rawBeadsProviderForScope(target.ScopeRoot, cityPath) == sqliteWorkProvider {
+		return doSQLiteWorkBd(cityPath, cfg, target, bdArgs, stdout, stderr)
+	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr

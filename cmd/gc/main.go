@@ -1850,80 +1850,87 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 		}
 		return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg, nativeTransport)
 	}
-	result, err := openStoreFactoryForCity(context.Background(), beads.StoreOpenOptions{
-		ScopeRoot:                  scopeRoot,
-		CityPath:                   runtimeCityPath,
-		Provider:                   provider,
-		PreflightChecker:           newBeadsPreflightChecker(runtimeCityPath, provider, cfg),
-		Logger:                     slog.Default(),
-		ConditionalWrites:          mode,
-		ConditionalWritesDefaulted: conditionalWritesOpenDefaulted(cfg, mode),
-		NativeTransport:            nativeTransport,
-		LongLived:                  longLived,
-		OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
-			flags, resolved := resolvedConditionalWritesFlags(cfg)
-			return lazyConditionalWritesDegradeEmitter(
-				runtimeCityPath, conditionalWritesStoreID(scopeRoot, runtimeCityPath), flags, resolved)
-		}(),
-		OpenFileStore: func() (beads.Store, error) {
-			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
-		},
-		OpenBdStore: openBd,
-		// The proxied-native lane. The factory consults this ONLY for a
-		// persisted proxied-server topology with GC_BEADS_PROXIED_NATIVE on, so
-		// wiring it here changes nothing for any other scope or for a binary
-		// with the flag off.
-		OpenProxiedStore: proxiedNativeStoreOpenerForScope(runtimeCityPath, scopeRoot, cfg, openBd),
-		OpenExecStore: func() (beads.Store, error) {
-			return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, cfg)
-		},
-		OpenNativeStore: func() (beads.Store, error) {
-			// Reuse the config this call already loaded. Passing nil made the
-			// rig-scoped projection load the whole city config a second time,
-			// pack expansion included, for the same city at the same moment.
-			// The reopen hook below deliberately keeps re-loading: it fires long
-			// after this open, where re-reading current state is the point.
-			var env map[string]string
-			var err error
-			if longLived {
-				env, err = nativeDoltOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
-			} else {
-				env, err = nativeDoltOneShotOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
-			}
-			// Reopen hook for the native read-path reconnect: the store's cached
-			// open env pins the managed Dolt port as of open time, which is dead
-			// after a hard-kill/rebind. Re-resolve the CURRENT env on every
-			// reconnect — nativeDoltOpenEnvForScope re-reads the live port and
-			// triggers managed-Dolt recovery/restart when the server is down
-			// (allowRecovery=true), mirroring how each bd subprocess re-resolves
-			// the port per command — then re-open against the live server via the
-			// direct native path (which bypasses the factory preflight/identity
-			// gate, so an absent scope project_id cannot block the reconnect).
-			// This reopen passes a nil config, so the fresh env re-reads the
-			// city's current beads.allow_schema_behind_migrate decision rather
-			// than keeping the one in force at open, and the reconnect does not
-			// re-run the preflight's version_compat gate. The controller's
-			// rig-store reopen (api_state.go) instead reuses the config it
-			// opened with.
-			reopen := func(ctx context.Context) (beads.NativeStorage, error) {
-				var freshEnv map[string]string
-				var rerr error
+	var result beads.StoreOpenResult
+	var err error
+	if provider == sqliteWorkProvider {
+		result.Store, err = openSQLiteWorkScope(scopeRoot, runtimeCityPath, false)
+		result.Diagnostic = beads.BeadsDiagnostic{Store: "SQLiteWorkStore", NativeStoreEligible: true}
+	} else {
+		result, err = openStoreFactoryForCity(context.Background(), beads.StoreOpenOptions{
+			ScopeRoot:                  scopeRoot,
+			CityPath:                   runtimeCityPath,
+			Provider:                   provider,
+			PreflightChecker:           newBeadsPreflightChecker(runtimeCityPath, provider, cfg),
+			Logger:                     slog.Default(),
+			ConditionalWrites:          mode,
+			ConditionalWritesDefaulted: conditionalWritesOpenDefaulted(cfg, mode),
+			NativeTransport:            nativeTransport,
+			LongLived:                  longLived,
+			OnConditionalWritesDegraded: func() func(beads.ConditionalWritesDegrade) {
+				flags, resolved := resolvedConditionalWritesFlags(cfg)
+				return lazyConditionalWritesDegradeEmitter(
+					runtimeCityPath, conditionalWritesStoreID(scopeRoot, runtimeCityPath), flags, resolved)
+			}(),
+			OpenFileStore: func() (beads.Store, error) {
+				return openCompatibleFileStore(scopeRoot, runtimeCityPath)
+			},
+			OpenBdStore: openBd,
+			// The proxied-native lane. The factory consults this ONLY for a
+			// persisted proxied-server topology with GC_BEADS_PROXIED_NATIVE on, so
+			// wiring it here changes nothing for any other scope or for a binary
+			// with the flag off.
+			OpenProxiedStore: proxiedNativeStoreOpenerForScope(runtimeCityPath, scopeRoot, cfg, openBd),
+			OpenExecStore: func() (beads.Store, error) {
+				return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, cfg)
+			},
+			OpenNativeStore: func() (beads.Store, error) {
+				// Reuse the config this call already loaded. Passing nil made the
+				// rig-scoped projection load the whole city config a second time,
+				// pack expansion included, for the same city at the same moment.
+				// The reopen hook below deliberately keeps re-loading: it fires long
+				// after this open, where re-reading current state is the point.
+				var env map[string]string
+				var err error
 				if longLived {
-					freshEnv, rerr = nativeDoltOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+					env, err = nativeDoltOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
 				} else {
-					freshEnv, rerr = nativeDoltOneShotOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+					env, err = nativeDoltOneShotOpenEnvForScope(runtimeCityPath, cfg, scopeRoot)
 				}
-				if rerr != nil {
-					return nil, fmt.Errorf("re-resolve native store env %s: %w", scopeRoot, rerr)
+				if err != nil {
+					return nil, fmt.Errorf("project native store env %s: %w", scopeRoot, err)
 				}
-				return beads.OpenNativeStorage(ctx, scopeRoot, freshEnv)
-			}
-			return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env, beads.WithNativeReopen(reopen))
-		},
-	})
+				// Reopen hook for the native read-path reconnect: the store's cached
+				// open env pins the managed Dolt port as of open time, which is dead
+				// after a hard-kill/rebind. Re-resolve the CURRENT env on every
+				// reconnect — nativeDoltOpenEnvForScope re-reads the live port and
+				// triggers managed-Dolt recovery/restart when the server is down
+				// (allowRecovery=true), mirroring how each bd subprocess re-resolves
+				// the port per command — then re-open against the live server via the
+				// direct native path (which bypasses the factory preflight/identity
+				// gate, so an absent scope project_id cannot block the reconnect).
+				// This reopen passes a nil config, so the fresh env re-reads the
+				// city's current beads.allow_schema_behind_migrate decision rather
+				// than keeping the one in force at open, and the reconnect does not
+				// re-run the preflight's version_compat gate. The controller's
+				// rig-store reopen (api_state.go) instead reuses the config it
+				// opened with.
+				reopen := func(ctx context.Context) (beads.NativeStorage, error) {
+					var freshEnv map[string]string
+					var rerr error
+					if longLived {
+						freshEnv, rerr = nativeDoltOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+					} else {
+						freshEnv, rerr = nativeDoltOneShotOpenEnvForScopeContext(ctx, runtimeCityPath, nil, scopeRoot)
+					}
+					if rerr != nil {
+						return nil, fmt.Errorf("re-resolve native store env %s: %w", scopeRoot, rerr)
+					}
+					return beads.OpenNativeStorage(ctx, scopeRoot, freshEnv)
+				}
+				return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env, beads.WithNativeReopen(reopen))
+			},
+		})
+	}
 	if err != nil {
 		return beads.StoreOpenResult{}, err
 	}
@@ -2099,6 +2106,9 @@ func openOneShotBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City
 }
 
 func openBdStoreAtScoped(storePath, cityPath string, cfg *config.City, oneShotConfig bool, nativeTransport beads.NativeTransportMode) (beads.Store, error) {
+	if rawBeadsProviderForScope(storePath, cityPath) == sqliteWorkProvider {
+		return openSQLiteWorkScope(resolveStoreScopeRoot(cityPath, storePath), cityPath, false)
+	}
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
 		var store *beads.BdStore
 		if oneShotConfig {

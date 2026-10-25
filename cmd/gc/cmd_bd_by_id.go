@@ -291,7 +291,9 @@ type bdByIDOp struct {
 	Reason string
 	// Update carries the field and metadata writes of the update verb, already
 	// translated into the object model's own shape.
-	Update beads.UpdateOpts
+	Update        beads.UpdateOpts
+	MatchAssignee *string
+	MatchStatus   *string
 }
 
 // parseBdByIDOp recognizes the by-ID invocations this surface serves. Anything
@@ -397,6 +399,10 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 			set(&op.Update.Description, value)
 		case "--assignee", "-a":
 			set(&op.Update.Assignee, value)
+		case "--if-assignee":
+			set(&op.MatchAssignee, value)
+		case "--if-status":
+			set(&op.MatchStatus, value)
 		case "--type", "-t":
 			set(&op.Update.Type, value)
 		case "--parent":
@@ -435,7 +441,7 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 		// The claim is a compare-and-swap the store owns; bundling other field
 		// writes into it here would either apply them outside that swap or
 		// re-implement it. bd's own `--claim` is likewise its own operation.
-		if bdByIDUpdateWritesFields(op, metadata) {
+		if bdByIDUpdateWritesFields(op, metadata) || op.MatchAssignee != nil || op.MatchStatus != nil {
 			return bdByIDOp{}, "--claim", false
 		}
 		return bdByIDOp{Verb: bdByIDClaim, ID: op.ID, JSON: op.JSON}, "", true
@@ -460,6 +466,7 @@ var bdByIDUpdateValueFlags = map[string]bool{
 	"-d": true, "--assignee": true, "-a": true, "--type": true, "-t": true,
 	"--parent": true, "--priority": true, "-p": true, "--add-label": true,
 	"--remove-label": true, "--set-metadata": true, "--unset-metadata": true,
+	"--if-assignee": true, "--if-status": true,
 }
 
 // bdByIDUpdateUnrepresentable explains the rejection an operator is most likely
@@ -941,6 +948,9 @@ func (d bdByIDClassDoor) firstResident(ids []string) (string, error) {
 // unrecognized flag may or may not consume the next token, and a guess here
 // would probe residence for a value rather than a subject.
 func bdByIDMutationSubjects(bdArgs []string) []string {
+	if op, ok := parseBdByIDOp(bdArgs); ok && op.Verb == bdByIDUpdate && (op.MatchAssignee != nil || op.MatchStatus != nil) {
+		return []string{op.ID}
+	}
 	ids, ok, ambiguous := bdMutationWriteIDs(bdArgs)
 	if !ok || ambiguous {
 		return nil
@@ -1971,7 +1981,7 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 			return 1
 		}
 	}
-	if err := graph.Update(op.ID, op.Update); err != nil {
+	if err := updateBdByIDConditionally(graph, op); err != nil {
 		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1981,6 +1991,31 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 		return 1
 	}
 	return printBdByIDBead(updated, op.JSON, binding, stdout, stderr)
+}
+
+func updateBdByIDConditionally(graph storebinding.GraphStore, op bdByIDOp) error {
+	if op.MatchAssignee == nil && op.MatchStatus == nil {
+		return graph.Update(op.ID, op.Update)
+	}
+	if len(op.Update.UnsetMetadata) > 0 {
+		return errors.New("conditional updates cannot unset metadata")
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		current, err := graph.Get(op.ID)
+		if err != nil {
+			return err
+		}
+		if op.MatchAssignee != nil && current.Assignee != *op.MatchAssignee || op.MatchStatus != nil && current.Status != *op.MatchStatus {
+			return nil
+		}
+		err = graph.UpdateIfMatch(op.ID, current.Revision, op.Update)
+		var conflict *beads.PreconditionFailedError
+		if errors.As(err, &conflict) {
+			continue
+		}
+		return err
+	}
+	return errors.New("conditional recovery update exhausted retry budget")
 }
 
 // doBdByIDClose retires a class-store bead through the closed graph contract.

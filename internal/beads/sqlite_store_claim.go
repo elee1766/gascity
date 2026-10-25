@@ -20,6 +20,10 @@ import (
 // (MaxOpenConns=1): competing claims serialize through one BeginTx, so exactly
 // one observes the bead unassigned.
 func (s *SQLiteStore) Claim(id, assignee string) (Bead, bool, error) {
+	return s.claim(id, assignee, false)
+}
+
+func (s *SQLiteStore) claim(id, assignee string, workLease bool) (Bead, bool, error) {
 	if err := s.ensureOpen(); err != nil {
 		return Bead{}, false, err
 	}
@@ -64,6 +68,9 @@ func (s *SQLiteStore) Claim(id, assignee string) (Bead, bool, error) {
 		b.Assignee = assignee
 		b.Status = "in_progress"
 		b.UpdatedAt = time.Now()
+		if workLease {
+			setWorkLease(&b, b.UpdatedAt)
+		}
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
 		}

@@ -493,7 +493,7 @@ func cityQueryTopology(cityPath string, cfg *config.City) config.QueryTopology {
 	if cfg != nil {
 		topo.Beads = cfg.Beads
 	}
-	topo.FederatedReady = routedWorkNeedsFederatedReader(cityPath, cfg)
+	topo.FederatedReady = routedWorkNeedsFederatedReader(cityPath, cfg) || (cfg != nil && cfg.Beads.Provider == sqliteWorkProvider)
 	return topo
 }
 

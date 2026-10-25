@@ -727,6 +727,9 @@ func resolveRawBeadsProviderForScope(scopeRoot, cityPath string, authoritative b
 	if strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT")) != "" {
 		provider = rawBeadsProviderFromConfig(runtimeCityPath)
 	}
+	if provider == sqliteWorkProvider {
+		return provider
+	}
 	if strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider) {
 		return provider
 	}

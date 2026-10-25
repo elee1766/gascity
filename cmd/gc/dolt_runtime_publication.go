@@ -67,6 +67,9 @@ func readPublishedDoltRuntimeStateHint(cityPath string) (doltRuntimeState, bool,
 }
 
 func managedDoltLifecycleOwned(cityPath string) (bool, error) {
+	if rawBeadsProvider(cityPath) == sqliteWorkProvider {
+		return false, nil
+	}
 	// The journal alone is not the classification. A city migrated in place by
 	// `gc beads city migrate-proxied`, or cloned from a proxied one, carries bd's
 	// proxied binding and no journal record at all — the migration deliberately

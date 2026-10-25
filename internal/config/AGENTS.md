@@ -15,6 +15,11 @@ keep already-owned workflow anchors available for continuation. Update the
 shell count and Go predicates together; otherwise an unclaimable latch can
 continually wake replacement workers.
 
+For `sqlite-work`, generated recovery hooks must use `gc ready` and guarded
+`gc bd update --if-assignee --if-status`, not a raw `bd` subprocess. Preserve
+the provider-independent user override and the existing bd recovery scripts.
+Keep the native read across work and infrastructure stores and both tiers.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and

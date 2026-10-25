@@ -208,6 +208,24 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 // binding recorded at boot; city init and normalization hold the city's
 // metadata to it and take the database name from it, never the fallback.
 func startBeadsLifecycleResolvingCityDatabase(cityPath string, cfg *config.City, stderr io.Writer, bootStore *cityStoreRecord) error {
+	if rawBeadsProvider(cityPath) == sqliteWorkProvider {
+		if err := initSQLiteWorkScope(cityPath, cityPath); err != nil {
+			return fmt.Errorf("init city SQLite work: %w", err)
+		}
+		for _, rig := range cfg.Rigs {
+			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
+			scope := resolveStoreScopeRoot(cityPath, rig.Path)
+			if rawBeadsProviderForScope(scope, cityPath) != sqliteWorkProvider {
+				return fmt.Errorf("sqlite-work city requires native work storage for rig %s", rig.Name)
+			}
+			if err := initSQLiteWorkScope(scope, cityPath); err != nil {
+				return fmt.Errorf("init rig %s SQLite work: %w", rig.Name, err)
+			}
+		}
+		return nil
+	}
 	if err := ensureFreshRigProviderOwnership(cityPath, cfg); err != nil {
 		return err
 	}
@@ -331,6 +349,9 @@ func startBeadsLifecycleResolvingCityDatabase(cityPath string, cfg *config.City,
 // Returns (deferred bool, err). deferred=true means the bd provider
 // skipped init — the caller should tell the user it's deferred to gc start.
 func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
+	if rawBeadsProviderForScope(dir, cityPath) == sqliteWorkProvider {
+		return false, initSQLiteWorkScope(resolveStoreScopeRoot(cityPath, dir), cityPath)
+	}
 	if gcDoltSkip() {
 		scopeOwned, ownershipErr := scopeProviderOwned(cityPath, dir)
 		if ownershipErr != nil {
@@ -966,6 +987,9 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 // booted one instead of a default-name fallback. Only the city scope passes a
 // record.
 func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, bootStore *cityStoreRecord) error {
+	if rawBeadsProviderForScope(dir, cityPath) == sqliteWorkProvider {
+		return initSQLiteWorkScope(resolveStoreScopeRoot(cityPath, dir), cityPath)
+	}
 	// The provider start op that runs before the city's init can take
 	// seconds, and each branch below acts on the metadata as it is now.
 	if bootStore != nil {
@@ -1837,6 +1861,9 @@ func (e *providerOpExitError) Error() string { return e.text }
 func (e *providerOpExitError) Unwrap() error { return e.exit }
 
 func ensureBeadsProvider(cityPath string) error {
+	if rawBeadsProvider(cityPath) == sqliteWorkProvider {
+		return nil
+	}
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
 		return err
 	} else if owned {
@@ -1922,6 +1949,9 @@ func shutdownBeadsProvider(cityPath string) error {
 // stopBeadsProviderBackend stops the bead store's backing service. See
 // shutdownBeadsProvider, its only caller.
 func stopBeadsProviderBackend(cityPath string) error {
+	if rawBeadsProvider(cityPath) == sqliteWorkProvider {
+		return nil
+	}
 	if owned, err := cityScopeProviderOwned(cityPath); err != nil {
 		return err
 	} else if owned {
@@ -1991,6 +2021,9 @@ type providerOpExecutor func(script string, environ []string, args ...string) er
 var finalizeCanonicalBdScopeInitForProvider = finalizeCanonicalBdScopeInit
 
 func initBeadsForDirWithExecutor(cityPath, dir, prefix, doltDatabase string, execute providerOpExecutor) error {
+	if rawBeadsProviderForScope(dir, cityPath) == sqliteWorkProvider {
+		return initSQLiteWorkScope(resolveStoreScopeRoot(cityPath, dir), cityPath)
+	}
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		if err := seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase); err != nil {
 			return err
@@ -2167,7 +2200,7 @@ func shouldInitDefaultRigBdStore(cityPath, dir, provider string) bool {
 		return false
 	}
 	provider = strings.TrimSpace(provider)
-	return provider != "" && provider != "file" && !strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider)
+	return provider != "" && provider != "file" && provider != sqliteWorkProvider && !strings.HasPrefix(provider, "exec:") && !providerUsesBdStoreContract(provider)
 }
 
 // scopeInitUsesProxiedDoltMode reports whether an initializer is creating this
@@ -2398,6 +2431,17 @@ func healthBeadsProvider(cityPath string) error {
 // immediately following OpenNativeStorage call is the scoped readiness check
 // and already shares this context.
 func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForScopes bool) error {
+	if rawBeadsProvider(cityPath) == sqliteWorkProvider {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		store, err := openSQLiteWorkScope(cityPath, cityPath, false)
+		if err != nil {
+			return err
+		}
+		defer store.CloseStore() //nolint:errcheck
+		return store.Ping()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

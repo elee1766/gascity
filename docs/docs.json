@@ -238,6 +238,7 @@
               "reference/system-packs",
               "reference/exec-session-provider",
               "reference/exec-beads-provider",
+              "reference/sqlite-work-provider",
               "reference/tmux-agent-slice",
               "reference/herdr-provider"
             ]

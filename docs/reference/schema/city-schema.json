@@ -1061,7 +1061,7 @@
       "properties": {
         "provider": {
           "type": "string",
-          "description": "Provider selects the bead store backend: \"bd\" (default, Dolt-backed),\n\"file\", or \"exec:\u003cscript\u003e\" for a user-supplied script. The \"sqlite\",\n\"sqlite-cgo\", and \"coordstore\" coordination-store providers were removed\nand now hard-error; migrate to \"doltlite\" or remove the setting.",
+          "description": "Provider selects the bead store backend: \"bd\" (default, Dolt-backed),\n\"file\", \"sqlite-work\" for native scope-local SQLite, or \"exec:\u003cscript\u003e\"\nfor a user-supplied script. The \"sqlite\",\n\"sqlite-cgo\", and \"coordstore\" coordination-store providers were removed\nand now hard-error; migrate to \"doltlite\" or remove the setting.",
           "default": "bd"
         },
         "backend": {

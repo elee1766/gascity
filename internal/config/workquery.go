@@ -1073,11 +1073,9 @@ type querySpec struct {
 	// override returns the user-supplied command that replaces the
 	// default entirely, or "" when the default applies.
 	override func(*Agent) string
-	// build returns the default command for a city topology. The onDeath/onBoot
-	// builders ignore BOTH of the topology's fields today and MUST keep ignoring
-	// them: the ephemeral flag by S04b invariant I6, and FederatedReady because
-	// they are WRITE hooks (`bd list` + `bd update`), which the federated READER
-	// has no form of — routing those is ga-601v2.
+	// build returns the default command for a city topology. Native SQLite
+	// recovery uses federated reads and guarded gc writes across both tiers.
+	// Legacy recovery retains its provider's bd commands.
 	build func(a *Agent, topo QueryTopology) string
 }
 
@@ -1382,13 +1380,15 @@ func (a *Agent) EffectiveOnDeath() string {
 }
 
 // EffectiveOnDeathFor returns the default on_death command for a city topology.
-// It is topology-blind: on_death is a write hook, and the federated reader has
-// no write form (ga-601v2).
+// Native work providers use guarded gc writes rather than a bd subprocess.
 func (a *Agent) EffectiveOnDeathFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnDeath, topo)
 }
 
 func buildOnDeath(a *Agent, topo QueryTopology) string {
+	if topo.Beads.Provider == "sqlite-work" {
+		return buildSQLiteWorkOnDeath(a)
+	}
 	route := a.QualifiedName()
 	if a.PoolName != "" {
 		route = a.PoolName
@@ -1425,13 +1425,15 @@ func (a *Agent) EffectiveOnBoot() string {
 }
 
 // EffectiveOnBootFor returns the default on_boot command for a city topology.
-// It is topology-blind: on_boot is a write hook, and the federated reader has no
-// write form (ga-601v2).
+// Native work providers use guarded gc writes rather than a bd subprocess.
 func (a *Agent) EffectiveOnBootFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnBoot, topo)
 }
 
 func buildOnBoot(a *Agent, topo QueryTopology) string {
+	if topo.Beads.Provider == "sqlite-work" {
+		return buildSQLiteWorkOnBoot(a)
+	}
 	template := a.QualifiedName()
 	if a.PoolName != "" {
 		template = a.PoolName
@@ -1448,4 +1450,30 @@ func buildOnBoot(a *Agent, topo QueryTopology) string {
 		ephemeralRead +
 		`} | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} sh -c 'if ! err=$(bd update "$1" --status open 2>&1 >/dev/null); then printf "gc-recovery: on_boot reopen failed for %s: %s\n" "$1" "$err"; fi' _ {}`
+}
+
+func buildSQLiteWorkOnDeath(a *Agent) string {
+	owner := shellquote.Quote(a.QualifiedName())
+	route := a.QualifiedName()
+	if a.PoolName != "" {
+		route = a.PoolName
+	}
+	return `gc ready --status in_progress --assignee ` + owner + ` --json | ` +
+		`jq -r '.[] | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' | ` +
+		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
+		`if ! err=$(gc bd update "$id" --if-assignee ` + owner + ` --if-status in_progress --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`else if ! err=$(gc bd update "$id" --if-assignee ` + owner + ` --if-status in_progress --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; fi; done`
+}
+
+func buildSQLiteWorkOnBoot(a *Agent) string {
+	template := a.QualifiedName()
+	if a.PoolName != "" {
+		template = a.PoolName
+	}
+	return `gc ready --status in_progress --unassigned --json | ` +
+		`jq -r --arg template ` + shellquote.Quote(template) + ` '.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' | ` +
+		`while IFS= read -r id; do [ -z "$id" ] && continue; ` +
+		`if ! err=$(gc bd update "$id" --if-assignee "" --if-status in_progress --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_boot reopen failed for %s: %s\n' "$id" "$err"; fi; done`
 }

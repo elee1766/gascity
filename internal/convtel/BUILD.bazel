@@ -1,0 +1,34 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "convtel",
+    srcs = [
+        "config.go",
+        "default.go",
+        "exporter.go",
+        "model.go",
+        "redact.go",
+        "session.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/convtel",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "convtel_test",
+    srcs = ["convtel_test.go"],
+    data = glob(["testdata/**"]),
+    embed = [":convtel"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)

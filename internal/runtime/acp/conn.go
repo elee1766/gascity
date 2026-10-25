@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/convtel"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -69,6 +70,10 @@ type sessionConn struct {
 	// capture is disabled. Set before readLoop starts and closed by the
 	// process monitor after readLoop exits.
 	capture *transcriptCapture
+
+	// conv streams the same traffic to the opt-in conversation exporter; nil
+	// when export is disabled. Lifetime matches capture.
+	conv *convtel.Session
 
 	// events publishes this connection's session events; nil until Start
 	// commits the connection to the Provider that owns it.
@@ -168,6 +173,9 @@ func (sc *sessionConn) readLoop(r io.Reader) {
 		// owns a copy.
 		if sc.capture != nil && isJSONObjectLine(line) {
 			sc.capture.record(captureIn, bytes.Clone(line))
+		}
+		if sc.conv != nil && isJSONObjectLine(line) {
+			sc.conv.Observe(convtel.In, bytes.Clone(line))
 		}
 
 		// Agent->client requests are answered before the typed decode,
@@ -439,6 +447,13 @@ func (sc *sessionConn) writeStdinLocked(closed <-chan struct{}, data, redacted [
 		sc.capture.recordRedacted(captureOut, redacted)
 	} else {
 		sc.capture.record(captureOut, data)
+	}
+	if sc.conv != nil {
+		if redacted != nil {
+			sc.conv.Observe(convtel.Out, bytes.Clone(redacted))
+		} else {
+			sc.conv.Observe(convtel.Out, bytes.Clone(data))
+		}
 	}
 	_, err := fmt.Fprintf(sc.stdin, "%s\n", data)
 	return err

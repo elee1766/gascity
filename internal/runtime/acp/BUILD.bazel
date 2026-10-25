@@ -26,6 +26,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/citylayout",
+        "//internal/convtel",
         "//internal/fsys",
         "//internal/runtime",
         "//internal/runtime/proctable",
@@ -41,6 +42,7 @@ go_test(
         "capacity_test.go",
         "capture_test.go",
         "conformance_test.go",
+        "conversation_export_test.go",
         "events_protocol_test.go",
         "events_test.go",
         "fence_test.go",
@@ -79,6 +81,7 @@ go_test(
     }),
     deps = [
         "//internal/bazeltest",
+        "//internal/convtel",
         "//internal/runtime",
         "//internal/runtime/auto",
         "//internal/runtime/hybrid",

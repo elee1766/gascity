@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/convtel"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -45,6 +46,9 @@ type Config struct {
 	// the in-flight turn before falling back to SIGINT. Default
 	// DefaultCancelTimeout.
 	CancelTimeout time.Duration
+	// ConversationExporter overrides the process-wide opt-in conversation
+	// exporter (convtel.Default). A test seam.
+	ConversationExporter *convtel.Exporter
 }
 
 func (c *Config) handshakeTimeout() time.Duration {
@@ -345,6 +349,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		sc.fence = f.Digest()
 	}
 	sc.capture = p.openCapture(name, cfg.Env, cmd.Process.Pid)
+	sc.conv = p.openConversation(name, cfg.Env, cmd.Process.Pid)
 	owned.Store(sc)
 
 	// Start readLoop before handshake so we can receive responses.
@@ -366,6 +371,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// not guaranteed to be dispatched.
 		<-sc.readDone
 		sc.capture.close(captureCloseTimeout)
+		sc.conv.Close(captureCloseTimeout)
 		sc.drainPending(nil)
 		sc.closeActivityPublisher()
 		_ = os.Remove(p.sockNamePath(name))
@@ -528,6 +534,24 @@ func (p *Provider) openCapture(name string, env map[string]string, pid int) *tra
 		return nil
 	}
 	return c
+}
+
+// openConversation starts the opt-in conversation exporter for one agent
+// start, or returns nil when GC_CONVERSATION_EXPORT is not enabled. It only
+// reads the session's launch env.
+func (p *Provider) openConversation(name string, env map[string]string, pid int) *convtel.Session {
+	exp := p.conversationExporter()
+	if exp == nil {
+		return nil
+	}
+	return convtel.NewSession(exp, convtel.IdentityFromEnv(name, env, pid), convtel.SecretEnvValues(env))
+}
+
+func (p *Provider) conversationExporter() *convtel.Exporter {
+	if p.cfg.ConversationExporter != nil {
+		return p.cfg.ConversationExporter
+	}
+	return convtel.Default()
 }
 
 func envWithoutKey(env []string, key string) []string {

@@ -1244,6 +1244,10 @@ func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (be
 	if provider == "file" || strings.HasPrefix(provider, "exec:") {
 		return openStoreAtForCity(storePath, cityPath)
 	}
+	// Native sqlite-work scopes have no bd ledger; a BdStore here shells the disabled external bd.
+	if provider == sqliteWorkProvider {
+		return openSQLiteWorkScope(scopeRoot, cityPath, false)
+	}
 	if samePath(scopeRoot, cityPath) {
 		return openControlBdStoreThroughFactory(scopeRoot, cityPath, provider, cfg, func() (beads.Store, error) {
 			return controlBdStoreForCity(scopeRoot, cityPath, cfg), nil

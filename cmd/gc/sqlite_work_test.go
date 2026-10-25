@@ -491,3 +491,33 @@ func TestSQLiteWorkDependenciesAndIdentityRefusals(t *testing.T) {
 		t.Fatal("mismatched scope identity accepted")
 	}
 }
+
+// Control dispatch must read native work stores in-process. A BdStore here shells
+// the disabled external bd and the dispatcher exits at startup (exit 78).
+func TestSQLiteWorkControlStoreOpensNatively(t *testing.T) {
+	city, rig, cfg := sqliteWorkTestCity(t)
+	for _, scope := range []string{city, rig} {
+		if err := initSQLiteWorkScope(scope, city); err != nil {
+			t.Fatal(err)
+		}
+		store, err := openControlStoreAtForCity(scope, city, cfg)
+		if err != nil {
+			t.Fatalf("open control store for %s: %v", scope, err)
+		}
+		native, ok := store.(*beads.SQLiteWorkStore)
+		if !ok {
+			t.Fatalf("control store for %s is %T, want native sqlite-work", scope, store)
+		}
+		created, err := native.Create(beads.Bead{Title: "control ready"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ready, err := native.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+		if err != nil || len(ready) != 1 || ready[0].ID != created.ID {
+			t.Fatalf("native ready for %s: %+v %v", scope, ready, err)
+		}
+		if err := native.CloseStore(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

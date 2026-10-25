@@ -64,9 +64,9 @@ func NewExporter(cfg Config, resource []Attr) *Exporter {
 				return http.ErrUseLastResponse
 			},
 		},
-		queue:    make(chan item, cfg.QueueSize),
-		done:     make(chan struct{}),
-		flush:    make(chan chan struct{}),
+		queue: make(chan item, cfg.QueueSize),
+		done:  make(chan struct{}),
+		flush: make(chan chan struct{}),
 	}
 	go e.run()
 	return e

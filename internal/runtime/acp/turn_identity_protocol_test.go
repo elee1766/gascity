@@ -59,7 +59,7 @@ func TestACPProtocolInterruptTurn(t *testing.T) {
 	if _, err := s.p.InterruptTurn(ctx, s.name, "stale"); !errors.Is(err, runtime.ErrTurnNotCurrent) {
 		t.Fatalf("stale InterruptTurn = %v, want ErrTurnNotCurrent", err)
 	}
-	if n := s.methodCount(t, methodSessionCancel); n != 0 {
+	if n := s.cancelCount(t); n != 0 {
 		t.Fatalf("stale interrupt sent %d session/cancel (%v)", n, s.methods(t))
 	}
 	ack, err := s.p.InterruptTurn(ctx, s.name, st.TurnID)
@@ -69,7 +69,7 @@ func TestACPProtocolInterruptTurn(t *testing.T) {
 	if after, err := s.p.WaitTurnEnded(ctx, s.name, st.TurnID, protocolWait); err != nil || after.Active() {
 		t.Fatalf("WaitTurnEnded = %+v, %v; want the turn ended", after, err)
 	}
-	if n := s.methodCount(t, methodSessionCancel); n != 1 {
+	if n := s.cancelCount(t); n != 1 {
 		t.Fatalf("session/cancel count = %d, want 1 (%v)", n, s.methods(t))
 	}
 	if signals := s.jsonlRecords(t, "signals.jsonl"); len(signals) != 0 {

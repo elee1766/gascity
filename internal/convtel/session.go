@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Direction is the side a wire line travelled.
+// Direction is the side a wire line traveled.
 type Direction int
 
 const (
@@ -295,7 +295,7 @@ func (s *Session) handle(l wireLine) {
 		// gc's reply to an agent request (permission, fs).
 		if p, ok := s.perms[id]; ok {
 			delete(s.perms, id)
-			body, _ := s.json(m.Result)
+			body := s.json(m.Result)
 			s.emitLog(l.ts, sevInfo, "conversation.permission.reply", body, s.toolSpan(p.toolCallID),
 				appendStr(nil, "gc.tool.call_id", p.toolCallID))
 		}
@@ -304,7 +304,7 @@ func (s *Session) handle(l wireLine) {
 	case l.dir == In && m.Method == "session/request_permission" && id != "":
 		s.permission(l.ts, id, m.Params)
 	case l.dir == In && m.Method != "" && id != "":
-		body, _ := s.json(m.Params)
+		body := s.json(m.Params)
 		s.emitLog(l.ts, sevInfo, "conversation.agent_request", body, s.turnSpan(), []Attr{strAttr("rpc.method", m.Method)})
 	case l.dir == In && m.Method == "" && id != "":
 		if t, ok := s.turns[id]; ok {
@@ -402,8 +402,10 @@ func (s *Session) endTurn(ts time.Time, t *turnState, result json.RawMessage, rp
 	s.emitLog(ts, sev, "conversation.turn.end", msg, t.spanID, attrs)
 	spanAttrs := append(s.baseAttrs(), attrs...)
 	spanAttrs = append(spanAttrs, strAttr("gc.content.prompt", t.prompt))
-	s.exp.EmitSpan(Span{TraceID: s.traceID, SpanID: t.spanID, ParentSpanID: s.rootSpan, Name: "gc.turn",
-		Start: t.start, End: ts, Attrs: spanAttrs, StatusCode: status, StatusMsg: msg})
+	s.exp.EmitSpan(Span{
+		TraceID: s.traceID, SpanID: t.spanID, ParentSpanID: s.rootSpan, Name: "gc.turn",
+		Start: t.start, End: ts, Attrs: spanAttrs, StatusCode: status, StatusMsg: msg,
+	})
 	if s.current == t {
 		s.current = nil
 	}
@@ -474,7 +476,7 @@ func (s *Session) update(ts time.Time, params json.RawMessage) {
 		// plan, usage_update, available_commands_update, current_mode_update and
 		// future variants: exported as provider-reported context snapshots.
 		// They do not end a streaming message.
-		body, _ := s.json(params)
+		body := s.json(params)
 		s.emitLog(ts, sevInfo, "conversation.update", body, s.turnSpan(), []Attr{strAttr("acp.update", u.Type)})
 	}
 }
@@ -540,7 +542,7 @@ func (s *Session) tool(ts time.Time, announce bool, p updateParams) {
 		t.output = append(t.output, toolContentText(u.Content))
 	}
 	if announce || !ok {
-		input, _ := s.json(t.input)
+		input := s.json(t.input)
 		s.emitLog(ts, sevInfo, "conversation.tool_call", input, t.spanID, s.toolAttrs(t))
 	}
 	if t.status == "completed" || t.status == "failed" {
@@ -601,7 +603,7 @@ func (s *Session) finishTool(ts time.Time, t *toolState, incomplete string) {
 		output += string(t.rawOut)
 	}
 	out, _ := s.text(output)
-	in, _ := s.json(t.input)
+	in := s.json(t.input)
 	attrs := s.toolAttrs(t)
 	status, sev := 1, sevInfo
 	if t.status == "failed" {
@@ -623,8 +625,10 @@ func (s *Session) finishTool(ts time.Time, t *toolState, incomplete string) {
 	if t.kind != "" {
 		name += " " + t.kind
 	}
-	s.exp.EmitSpan(Span{TraceID: s.traceID, SpanID: t.spanID, ParentSpanID: t.parent, Name: name,
-		Start: t.start, End: ts, Attrs: spanAttrs, StatusCode: status})
+	s.exp.EmitSpan(Span{
+		TraceID: s.traceID, SpanID: t.spanID, ParentSpanID: t.parent, Name: name,
+		Start: t.start, End: ts, Attrs: spanAttrs, StatusCode: status,
+	})
 }
 
 func (s *Session) finishToolsOf(ts time.Time, parent, why string) {
@@ -641,8 +645,10 @@ func (s *Session) finishOpen(ts time.Time, why string) {
 		s.finishToolsOf(ts, t.spanID, why)
 		s.emitLog(ts, sevWarn, "conversation.turn.end", why, t.spanID, []Attr{boolAttr("gc.turn.incomplete", true)})
 		attrs := append(s.baseAttrs(), boolAttr("gc.turn.incomplete", true), strAttr("gc.content.prompt", t.prompt))
-		s.exp.EmitSpan(Span{TraceID: s.traceID, SpanID: t.spanID, ParentSpanID: s.rootSpan, Name: "gc.turn",
-			Start: t.start, End: ts, Attrs: attrs, StatusMsg: why})
+		s.exp.EmitSpan(Span{
+			TraceID: s.traceID, SpanID: t.spanID, ParentSpanID: s.rootSpan, Name: "gc.turn",
+			Start: t.start, End: ts, Attrs: attrs, StatusMsg: why,
+		})
 	}
 	s.turns = map[string]*turnState{}
 	s.current = nil
@@ -660,13 +666,13 @@ func (s *Session) permission(ts time.Time, id string, params json.RawMessage) {
 	}
 	_ = json.Unmarshal(params, &p)
 	s.perms[id] = permState{toolCallID: p.ToolCall.ID, title: p.ToolCall.Title}
-	body, _ := s.json(params)
+	body := s.json(params)
 	s.emitLog(ts, sevInfo, "conversation.permission.request", body, s.toolSpan(p.ToolCall.ID),
 		appendStr(nil, "gc.tool.call_id", p.ToolCall.ID))
 }
 
 func (s *Session) contextSnapshot(ts time.Time, what string, raw json.RawMessage) {
-	body, _ := s.json(raw)
+	body := s.json(raw)
 	s.emitLog(ts, sevInfo, "conversation.context", body, s.rootSpan, []Attr{strAttr("gc.context.source", what)})
 }
 
@@ -683,9 +689,9 @@ func (s *Session) text(v string) (string, bool) {
 	return out, cut
 }
 
-func (s *Session) json(raw json.RawMessage) (string, bool) {
+func (s *Session) json(raw json.RawMessage) string {
 	if len(raw) == 0 {
-		return "", false
+		return ""
 	}
 	r, n := s.redactor.JSON(raw)
 	if n > 0 {
@@ -695,7 +701,7 @@ func (s *Session) json(raw json.RawMessage) (string, bool) {
 	if cut {
 		s.exp.truncated.Add(1)
 	}
-	return out, cut
+	return out
 }
 
 func (s *Session) baseAttrs() []Attr {

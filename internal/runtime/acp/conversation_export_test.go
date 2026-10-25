@@ -86,8 +86,10 @@ func TestACPConversationExportEndToEnd(t *testing.T) {
 	if strings.Contains(all, secret) {
 		t.Fatal("launch-env credential reached the exporter")
 	}
-	for _, want := range []string{"conversation.prompt", "say hi; my token is <redacted>", "conversation.reasoning", "thinking aloud",
-		"conversation.tool_call", "fixture contents", "conversation.assistant_message", `"gc.turn"`, `"gc.agent"`} {
+	for _, want := range []string{
+		"conversation.prompt", "say hi; my token is <redacted>", "conversation.reasoning", "thinking aloud",
+		"conversation.tool_call", "fixture contents", "conversation.assistant_message", `"gc.turn"`, `"gc.agent"`,
+	} {
 		if !strings.Contains(all, want) {
 			t.Fatalf("export lacks %q:\n%s", want, all)
 		}
@@ -114,6 +116,11 @@ func TestACPConversationExportEndToEnd(t *testing.T) {
 		t.Fatal("no trace IDs exported")
 	}
 	t.Logf("trace %s", first)
+	if testing.Verbose() {
+		for _, b := range bodies {
+			t.Logf("OTLP %s", b)
+		}
+	}
 }
 
 func collectStrings(v any, key string) []string {

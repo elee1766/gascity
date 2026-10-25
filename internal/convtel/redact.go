@@ -153,13 +153,13 @@ func isSecretKey(k string) bool {
 	return secretKeyPattern.MatchString(lk)
 }
 
-// Truncate caps s at max bytes on a rune boundary, appending an explicit
+// Truncate caps s at limit bytes on a rune boundary, appending an explicit
 // marker. It reports whether s was cut.
-func Truncate(s string, max int) (string, bool) {
-	if max <= 0 || len(s) <= max {
+func Truncate(s string, limit int) (string, bool) {
+	if limit <= 0 || len(s) <= limit {
 		return s, false
 	}
-	cut := max
+	cut := limit
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}

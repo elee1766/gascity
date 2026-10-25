@@ -108,7 +108,7 @@ func replay(t *testing.T, s *Session, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(nil, 1<<20)
 	for sc.Scan() {
@@ -188,7 +188,8 @@ func TestRecordedConversationCorrelation(t *testing.T) {
 		code := int(tr["status"].(map[string]any)["code"].(float64))
 		statuses[attr(tr, "gc.turn.stop_reason")+"/"+map[int]string{0: "unset", 1: "ok", 2: "error"}[code]]++
 	}
-	if statuses["end_turn/ok"] != 2 || statuses["cancelled/ok"] != 1 || statuses["/error"] != 1 {
+	if statuses["end_turn/ok"] != 2 || statuses["cancelled/ok"] != 1 || //nolint:misspell // ACP stopReason literal
+		statuses["/error"] != 1 {
 		t.Fatalf("turn statuses = %v", statuses)
 	}
 

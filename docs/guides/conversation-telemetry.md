@@ -12,11 +12,11 @@ Traces (one trace per agent start):
 | --- | --- | --- |
 | `gc.agent` | none | Lifetime of one ACP process |
 | `gc.turn` | `gc.agent` | One `session/prompt` request to its response. `gc.content.prompt` holds the prompt text |
-| `gc.tool.<kind>` | `gc.turn` | One `tool_call` id from announce to final status |
+| `gc.tool <kind>` | `gc.turn` | One `tool_call` id from announce to final status |
 
 Logs (each carries `traceId` and `spanId` of the turn or tool it belongs to, and a stable `gc.event.id`):
 
-`conversation.user_message`, `conversation.assistant_message`, `conversation.reasoning`, `conversation.tool_call`, `conversation.tool_result`, `conversation.permission.request`, `conversation.permission.reply`, `conversation.context`, `conversation.agent_request`, `conversation.update`, `conversation.turn.end`.
+`conversation.session.start`, `conversation.session.end`, `conversation.context`, `conversation.prompt`, `conversation.user_message`, `conversation.assistant_message`, `conversation.reasoning`, `conversation.tool_call`, `conversation.tool_result`, `conversation.permission.request`, `conversation.permission.reply`, `conversation.agent_request`, `conversation.update`, `conversation.turn.cancel_requested`, `conversation.turn.end`.
 
 Content lives in the log body and in `gc.content.*` attributes (`gc.content.prompt`, `gc.content.tool_input`, `gc.content.tool_output`). These names are distinct from the operational `args`, `stdout` and `tool_input` attributes, so collector rules that drop those do not drop conversation content. A collector allowlist must keep `gc.content.*` explicitly.
 
@@ -60,7 +60,7 @@ GC_CONVERSATION_OTLP_URL=http://127.0.0.1:14318
 GC_CONVERSATION_MAX_FIELD_BYTES=32768
 ```
 
-The collector's logs and traces pipelines need an OTLP/HTTP receiver on that port and must keep `gc.content.*` attributes.
+The collector's logs and traces pipelines need an OTLP/HTTP receiver on that port and must keep `gc.content.*` attributes. The local stack's `attributes/redact` processor does not touch `gc.content.*`, but its `transform/truncate` cuts every log attribute to 512 bytes. Log bodies are not affected. Raise or scope that limit to keep full tool input in log attributes.
 
 ## Query examples
 

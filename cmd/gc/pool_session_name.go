@@ -392,6 +392,9 @@ func releaseOrphanedPoolAssignments(
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
+		if assignee != "" {
+			releaseDeadOwnerSourceClaims(store, rigStores, ownerStore, wb, time.Now())
+		}
 	}
 	if recordPhase != nil {
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments.release_sweep", sweepStart, map[string]any{
@@ -508,6 +511,7 @@ func releaseConfirmedOrphanSessionWork(
 		}
 		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, seat, cfg, ReleaseOpts{}); len(out.Released) > 0 {
 			released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
+			releaseDeadOwnerSourceClaims(store, rigStores, ownerStore, wb, time.Now())
 		}
 	}
 	return released

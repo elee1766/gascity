@@ -171,6 +171,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		Dir:                     "target-dir",
 		Rig:                     "target-rig",
 		Name:                    "target-name",
+		Namepool:                strVal("names.txt"),
 		WorkDir:                 strVal(".gc/agents/worker"),
 		TmuxAlias:               strVal("worker--{{.Rig}}"),
 		Scope:                   strVal("city"),

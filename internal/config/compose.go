@@ -910,6 +910,10 @@ func adjustPatchPaths(patches *Patches, declDir, cityRoot string) {
 			v := adjustFragmentPath(*p.PromptTemplate, declDir, cityRoot)
 			p.PromptTemplate = &v
 		}
+		if p.Namepool != nil && *p.Namepool != "" {
+			v := adjustFragmentPath(*p.Namepool, declDir, cityRoot)
+			p.Namepool = &v
+		}
 		if p.OverlayDir != nil && *p.OverlayDir != "" {
 			v := adjustFragmentPath(*p.OverlayDir, declDir, cityRoot)
 			p.OverlayDir = &v

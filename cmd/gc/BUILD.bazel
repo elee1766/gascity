@@ -709,6 +709,7 @@ go_library(
         "//internal/clientgrant",
         "//internal/clock",
         "//internal/config",
+        "//internal/convtel",
         "//internal/configedit",
         "//internal/connect",
         "//internal/convergence",

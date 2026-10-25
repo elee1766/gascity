@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convtel"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -210,6 +211,11 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 		}()
 		setCLIProcessOTELAttrs()
 	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = convtel.ShutdownDefault(ctx)
+	}()
 	execStdout := &switchableWriter{target: stdout}
 	var jsonStdout bytes.Buffer
 	var observedStdout *countingWriter

@@ -542,8 +542,14 @@ test-herdr-live:
 # sharded via the mac-cmd-gc-process CI matrix job instead.
 MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
 
+## test-mac-pkgs-guard: fail when MAC_UNIT_PKGS is empty. A failed go list
+## expands it to nothing, and go test over no packages passes vacuously.
+.PHONY: test-mac-pkgs-guard
+test-mac-pkgs-guard:
+	@test -n "$(strip $(MAC_UNIT_PKGS))" || { echo "test-mac: go list found no packages; refusing to pass over an empty sweep" >&2; exit 1; }
+
 ## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
-test-mac: test-fsys-darwin-compile
+test-mac: test-mac-pkgs-guard test-fsys-darwin-compile
 	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test-mac -- -p=4 -count=1 -timeout 15m $(MAC_UNIT_PKGS)
 
 ## test-coarse-clock: creation-order suites under a millisecond MemStore clock.

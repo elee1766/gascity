@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -38,6 +40,24 @@ func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	}
 }
 
+func TestSQLiteWorkQueriesDoNotInvokeExternalBeads(t *testing.T) {
+	topo := QueryTopology{Beads: BeadsConfig{Provider: "sqlite-work"}}
+	externalBD := regexp.MustCompile(`(^|[;|&(])\s*bd (query|show|ready|list|update)`)
+	for _, name := range []string{"worker", "core.control-dispatcher"} {
+		a := &Agent{Name: name}
+		for kind := range queryTable {
+			script := a.effectiveQuery(kind, topo)
+			if externalBD.MatchString(script) {
+				t.Errorf("%s query %d invokes external bd: %s", name, kind, script)
+			}
+			cmd := exec.Command("sh", "-n", "-c", script)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Errorf("%s query %d shell syntax: %v: %s", name, kind, err, out)
+			}
+		}
+	}
+}
+
 // TestAssignedInProgressTierOnSingleStore is the control: a city that
 // relocates nothing keeps its single-store `bd list` reader, and that read
 // fails the query the same way the federated one does. It once pinned the
@@ -55,7 +75,7 @@ func TestAssignedInProgressTierOnSingleStore(t *testing.T) {
 	// The single-store enrichment must not grow the presence key: its reader is
 	// `bd list`, whose rows never carry blocked_by, so the branch could only ever
 	// be dead shell on the path every deployment runs.
-	single := inProgressBlockedByEnrichmentScript(false, true)
+	single := inProgressBlockedByEnrichmentScript(false, true, false)
 	if strings.Contains(single, "blocked_by // empty") {
 		t.Errorf("single-store enrichment grew the federated presence key: %q", single)
 	}

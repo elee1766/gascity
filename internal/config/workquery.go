@@ -35,7 +35,7 @@ type QueryTopology struct {
 // includeEphemeralReady reports whether generated ready reads may ask for the
 // wisp/ephemeral tier.
 func (t QueryTopology) includeEphemeralReady() bool {
-	return t.Beads.UsesBD105ReadySemantics()
+	return t.Beads.Provider == "sqlite-work" || t.Beads.UsesBD105ReadySemantics()
 }
 
 // Ready reader commands. bdReadyCommand reads exactly one store — whichever one
@@ -593,12 +593,12 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 		identityLoopHead() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
 		assignedInProgressCandidatesTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true) +
+		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor("id", topo) +
@@ -655,7 +655,7 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 	return identityLoopHead() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true) +
+		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("id", topo) +
 		`done; `
@@ -725,22 +725,23 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // never fire there — it would be pure added shell on the path every existing
 // deployment runs, for zero behavior change. Same zero-risk scoping the ready
 // tiers used for their own swap.
-func inProgressBlockedByEnrichmentScript(federated bool, checkHold bool) string {
+func inProgressBlockedByEnrichmentScript(federated bool, checkHold bool, native bool) string {
 	return inProgressBlockedByEnrichmentScriptWithServeAction(
 		federated,
 		checkHold,
 		`printf "%s" "$r" && exit 0; `,
+		native,
 	)
 }
 
-func inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(federated bool, checkHold bool) string {
+func inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(federated bool, checkHold bool, native bool) string {
 	graphAnchorJQ := `.[0] | select(` + graphWorkflowAnchorJQPredicate() + `) | .id // empty`
 	serveAction := `graph_anchor_id=$(printf "%s" "$r" | jq -r ` +
 		shellquote.Quote(graphAnchorJQ) + ` 2>/dev/null); ` +
 		`if [ -n "$graph_anchor_id" ]; then ` +
 		`[ -n "$gc_assigned_workflow_anchor_json" ] || gc_assigned_workflow_anchor_json="$r"; ` +
 		`else printf "%s" "$r" && exit 0; fi; `
-	return inProgressBlockedByEnrichmentScriptWithServeAction(federated, checkHold, serveAction)
+	return inProgressBlockedByEnrichmentScriptWithServeAction(federated, checkHold, serveAction, native)
 }
 
 func graphWorkflowAnchorJQPredicate() string {
@@ -750,17 +751,17 @@ func graphWorkflowAnchorJQPredicate() string {
 
 // serveOrdinaryInProgressCandidateScript selects the first non-anchor row from
 // the bounded second read, then applies the unchanged crash-recovery gates.
-func serveOrdinaryInProgressCandidateScript(federated bool, checkHold bool) string {
+func serveOrdinaryInProgressCandidateScript(federated bool, checkHold bool, native bool) string {
 	predicate := graphWorkflowAnchorJQPredicate()
 	nonAnchorJQ := `[.[] | select((` + predicate + `) | not)] | .[:1]`
 	return `gc_assigned_in_progress_candidates_json="$r"; ` +
 		`r=$(printf "%s" "$gc_assigned_in_progress_candidates_json" | jq -c ` + shellquote.Quote(nonAnchorJQ) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript(federated, checkHold) +
+		inProgressBlockedByEnrichmentScript(federated, checkHold, native) +
 		`fi; `
 }
 
-func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHold bool, serveAction string) string {
+func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHold bool, serveAction string, native bool) string {
 	// The tier stores its candidate row in $r and its enriched copy in
 	// $r_enriched; both callers use those names.
 	const shellVar = "r"
@@ -790,6 +791,14 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 		fallback += `fi; `
 	}
 
+	initial := `bb="[]"; `
+	if native {
+		// Native ready rows include blocker state, with an omitted field meaning no blockers.
+		carried = `bb=$(printf "%s" "` + v + `" | jq -c '.[0].blocked_by // []' 2>/dev/null); `
+		initial = ""
+		fallback = ""
+	}
+
 	holdCheck := ""
 	holdCond := ""
 	if checkHold {
@@ -800,7 +809,7 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 
 	return `bid=$(printf "%s" "` + v + `" | jq -r ".[0].id // empty" 2>/dev/null); ` +
 		carried +
-		`bb="[]"; ` +
+		initial +
 		fallback +
 		`[ -z "$bb" ] && bb="[]"; ` +
 		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
@@ -845,12 +854,12 @@ func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo Que
 		`[ -z "$cand" ] && continue; ` +
 		assignedInProgressTierCommand("cand", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
 		assignedInProgressCandidatesTierCommand("cand", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true) +
+		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor("cand", topo) +
@@ -865,7 +874,7 @@ func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 		`[ -z "$cand" ] && continue; ` +
 		assignedInProgressTierCommand("cand", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true) +
+		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("cand", topo) +
 		`done; ` +
@@ -906,7 +915,9 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // serving a surviving candidate, or a blocked in_progress wisp step is
 // re-served on every hook tick (ga-qjozkw).
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
-	_ = topo
+	if topo.Beads.Provider == "sqlite-work" {
+		return ""
+	}
 	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `] | .[:1]`
 	// federated=false: this row comes from `bd query`, which never carries a
 	// resolved blocked_by, so the carried-lookup branch would only ever fall
@@ -917,22 +928,24 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 		`r=$(printf "%s" "$in_progress_ephemeral" | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript(false, false) +
+		inProgressBlockedByEnrichmentScript(false, false, false) +
 		`fi; `
 }
 
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
-	_ = topo
+	if topo.Beads.Provider == "sqlite-work" {
+		return ""
+	}
 	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `]`
 	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, false) +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, false, false) +
 		`fi; ` +
 		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:20]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		serveOrdinaryInProgressCandidateScript(false, false) +
+		serveOrdinaryInProgressCandidateScript(false, false, false) +
 		`fi; ` +
 		`fi; `
 }
@@ -967,7 +980,7 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		// carries a resolved blocked_by, so skip straight to the bd show
 		// fallback. checkHold=false: ga-5736js, this probe must stay
 		// hold-transparent.
-		inProgressBlockedByEnrichmentScript(false, false) +
+		inProgressBlockedByEnrichmentScript(false, false, false) +
 		`fi; `
 }
 
@@ -1098,6 +1111,9 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 	spec := queryTable[kind]
 	if o := spec.override(a); o != "" {
 		return o
+	}
+	if topo.Beads.Provider == "sqlite-work" {
+		topo.FederatedReady = true
 	}
 	return spec.build(a, topo)
 }

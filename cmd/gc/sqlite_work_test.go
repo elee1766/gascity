@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func sqliteWorkTestCity(t *testing.T) (string, string, *config.City) {
@@ -21,7 +22,7 @@ func sqliteWorkTestCity(t *testing.T) (string, string, *config.City) {
 	resetCLIStorageRoutes(t)
 	city := t.TempDir()
 	rig := filepath.Join(city, "rig")
-	if err := os.MkdirAll(rig, 0755); err != nil {
+	if err := os.MkdirAll(rig, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	body := fmt.Sprintf(`[workspace]
@@ -34,7 +35,7 @@ name = "rig"
 path = %q
 prefix = "wrk"
 `, rig)
-	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(body), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("GC_CITY", city)
@@ -45,6 +46,92 @@ prefix = "wrk"
 		t.Fatal(err)
 	}
 	return city, rig, cfg
+}
+
+func TestSQLiteWorkRigAddUnconfiguredScope(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		prefix    string
+		marker    string
+		contents  string
+		wantError string
+	}{
+		{name: "derived prefix"},
+		{name: "explicit prefix", prefix: "nwr"},
+		{name: "route rollback", wantError: "writing routes"},
+		{name: "prefix collision", prefix: "wrk", wantError: "collides"},
+		{name: "legacy bd", marker: ".beads/metadata.json", contents: "{}", wantError: "beads store"},
+		{name: "legacy file", marker: ".gc/beads.json", contents: "{}", wantError: "refusing implicit migration"},
+		{name: "orphan ledger", marker: ".gc/store/work/beads.sqlite", wantError: "refusing implicit migration"},
+		{name: "identity mismatch", marker: ".gc/store/work/identity.json", contents: `{"provider":"sqlite-work","prefix":"other"}`, wantError: "identity mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city, _, _ := sqliteWorkTestCity(t)
+			t.Setenv("HOME", t.TempDir())
+			rig := filepath.Join(city, "newrig")
+			if err := os.MkdirAll(rig, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.marker != "" {
+				path := filepath.Join(rig, tc.marker)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(tc.contents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.name == "route rollback" {
+				if err := os.MkdirAll(filepath.Join(city, "rig", ".beads", "routes.jsonl"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			original, err := os.ReadFile(filepath.Join(city, "city.toml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := openSQLiteWorkScope(rig, city, false); err == nil || !strings.Contains(err.Error(), "unconfigured scope") {
+				t.Fatalf("ordinary read accepted unconfigured rig: %v", err)
+			}
+			if err := initSQLiteWorkScope(rig, city); err == nil || !strings.Contains(err.Error(), "unconfigured scope") {
+				t.Fatalf("ordinary initialization accepted unconfigured rig: %v", err)
+			}
+			var out, stderr bytes.Buffer
+			code := doRigAdd(fsys.OSFS{}, city, rig, nil, "", tc.prefix, "", false, false, &out, &stderr)
+			if tc.wantError != "" {
+				if code != 1 || !strings.Contains(stderr.String(), tc.wantError) {
+					t.Fatalf("rig add = %d, want %q: %s", code, tc.wantError, stderr.String())
+				}
+				after, err := os.ReadFile(filepath.Join(city, "city.toml"))
+				if err != nil || !bytes.Equal(original, after) {
+					t.Fatalf("failed provisioning changed city config: %v", err)
+				}
+				if _, err := openSQLiteWorkScope(rig, city, false); err == nil || !strings.Contains(err.Error(), "unconfigured scope") {
+					t.Fatalf("failed provisioning authorized the scope: %v", err)
+				}
+				return
+			}
+			if code != 0 {
+				t.Fatalf("rig add failed before registration: %s", stderr.String())
+			}
+			store, err := openSQLiteWorkScope(rig, city, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.CloseStore() //nolint:errcheck
+			ticket, err := store.Create(beads.Bead{Title: "new rig work"})
+			prefix := tc.prefix
+			if prefix == "" {
+				prefix = config.DeriveBeadsPrefix("newrig")
+			}
+			if err != nil || !strings.HasPrefix(ticket.ID, prefix+"-") {
+				t.Fatalf("new rig cannot mint its own work: %+v, %v", ticket, err)
+			}
+			if _, err := os.Stat(filepath.Join(rig, ".beads", "metadata.json")); !os.IsNotExist(err) {
+				t.Fatalf("native provisioning created legacy store: %v", err)
+			}
+		})
+	}
 }
 
 func TestSQLiteWorkHookClaimsBeyondWorkflowLatches(t *testing.T) {
@@ -58,7 +145,7 @@ func TestSQLiteWorkHookClaimsBeyondWorkflowLatches(t *testing.T) {
 				t.Fatal(err)
 			}
 			body = append(body, []byte("\n[[agent]]\nname = \"worker\"\n")...)
-			if err := os.WriteFile(path, body, 0600); err != nil {
+			if err := os.WriteFile(path, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			for _, scope := range []string{city, rig} {
@@ -279,7 +366,7 @@ nudges = "infra"
 provider = "sqlite-beads"
 path = ".gc/store/graph"
 `)...)
-	if err := os.WriteFile(path, body, 0600); err != nil {
+	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err = loadCityConfigForBdPassthrough(city, &bytes.Buffer{})
@@ -397,7 +484,7 @@ func TestSQLiteWorkDependenciesAndIdentityRefusals(t *testing.T) {
 		t.Fatalf("released readiness: %+v %v", ready, err)
 	}
 	identity := filepath.Join(sqliteWorkDir(rig), "identity.json")
-	if err := os.WriteFile(identity, []byte(`{"provider":"sqlite-work","prefix":"other"}`), 0600); err != nil {
+	if err := os.WriteFile(identity, []byte(`{"provider":"sqlite-work","prefix":"other"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := openSQLiteWorkScope(rig, city, false); err == nil {

@@ -341,12 +341,31 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		name = filepath.Base(rigPath)
 	}
 
+	// Provision validates the candidate rig and prefix before invoking these
+	// callbacks, but commits topology only after store initialization succeeds.
+	initSQLite := func(cp, dir, prefix string) error {
+		store, err := openSQLiteWorkScopeWithPrefix(resolveStoreScopeRoot(cp, dir), prefix, true)
+		if err != nil {
+			return err
+		}
+		return store.CloseStore()
+	}
 	deps := rig.Deps{
-		FS:           fs,
-		CityPath:     cityPath,
-		Cfg:          cfg,
-		InitStore:    initDirIfReady,
-		InitAndHook:  initAndHookDir,
+		FS:       fs,
+		CityPath: cityPath,
+		Cfg:      cfg,
+		InitStore: func(cp, dir, prefix string) (bool, error) {
+			if rawBeadsProviderForScope(dir, cp) == sqliteWorkProvider {
+				return false, initSQLite(cp, dir, prefix)
+			}
+			return initDirIfReady(cp, dir, prefix)
+		},
+		InitAndHook: func(cp, dir, prefix string) error {
+			if rawBeadsProviderForScope(dir, cp) == sqliteWorkProvider {
+				return initSQLite(cp, dir, prefix)
+			}
+			return initAndHookDir(cp, dir, prefix)
+		},
 		ComposePacks: ensureBundledRigImportsInstalled,
 		WriteRoutes: func(cp string, c *config.City) error {
 			return writeAllRigRoutes(collectRigRoutes(cp, c))

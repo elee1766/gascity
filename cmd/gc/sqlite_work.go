@@ -30,6 +30,12 @@ func openSQLiteWorkScope(scopeRoot, cityPath string, initialize bool) (*beads.SQ
 	if err != nil {
 		return nil, err
 	}
+	return openSQLiteWorkScopeWithPrefix(scopeRoot, prefix, initialize)
+}
+
+// openSQLiteWorkScopeWithPrefix also serves rig provisioning, whose validated
+// candidate prefix is available before the topology is committed to disk.
+func openSQLiteWorkScopeWithPrefix(scopeRoot, prefix string, initialize bool) (*beads.SQLiteWorkStore, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("sqlite-work: cannot resolve prefix for %s", scopeRoot)
 	}

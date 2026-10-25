@@ -58,7 +58,12 @@ func NewExporter(cfg Config, resource []Attr) *Exporter {
 	e := &Exporter{
 		cfg:      cfg,
 		resource: resource,
-		client:   &http.Client{Timeout: cfg.HTTPTimeout},
+		client: &http.Client{
+			Timeout: cfg.HTTPTimeout,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		queue:    make(chan item, cfg.QueueSize),
 		done:     make(chan struct{}),
 		flush:    make(chan chan struct{}),

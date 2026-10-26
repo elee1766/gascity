@@ -100,6 +100,9 @@ func DoSling(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, 
 	default:
 		result, err = slingPlainBead(opts, deps, beadID, result)
 	}
+	if err == nil && opts.Nudge {
+		result.NudgeAgent = &a
+	}
 	return result, err
 }
 

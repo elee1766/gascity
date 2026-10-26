@@ -539,7 +539,8 @@ var errRetiredWorkHeld = errors.New("held or linked work stays with the retired 
 // ReassignRetiredWorkBead is ReassignWorkBead for a session retirement: the
 // held/linked check runs on the live row whose revision fences the write, so
 // work that became held or linked after the caller's guard is never moved.
-// Stores without a revision fence fall back to the status/assignee guard.
+// Stores without a revision fence refuse: a status/assignee guard cannot see a
+// hold label or linkage metadata written after the re-read.
 func (w workAssignment) ReassignRetiredWorkBead(item beads.Bead, newSessionID string, held func(beads.Bead) bool) error {
 	store := w.unwrapped()
 	if store == nil {
@@ -570,13 +571,7 @@ func (w workAssignment) ReassignRetiredWorkBead(item beads.Bead, newSessionID st
 			return fmt.Errorf("reassigning %q: %w", item.ID, err)
 		}
 	}
-	if updater, ok := beads.AssignmentGuardedUpdaterFor(store); ok {
-		if _, err := updater.UpdateIfAssignment(item.ID, current.Status, strings.TrimSpace(current.Assignee), opts); err != nil {
-			return fmt.Errorf("reassigning %q: %w", item.ID, err)
-		}
-		return nil
-	}
-	return fmt.Errorf("reassigning %q: the store cannot reassign it conditionally: %w", item.ID, beads.ErrConditionalWriteUnsupported)
+	return fmt.Errorf("reassigning %q: the store has no revision fence: %w", item.ID, beads.ErrConditionalWriteUnsupported)
 }
 
 // ClearDetachedProbe clears the detached-probe metadata contract on a WORK bead,

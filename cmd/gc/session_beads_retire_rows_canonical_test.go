@@ -212,3 +212,74 @@ func TestRetirementRefusesWorkHeldDuringRuntimeStop(t *testing.T) {
 		})
 	}
 }
+
+// reread hooks the live re-read so a hold can land between it and the write.
+type rereadHookStore struct {
+	beads.Store
+	afterGet func()
+}
+
+func (s *rereadHookStore) Get(id string) (beads.Bead, error) {
+	b, err := s.Store.Get(id)
+	if s.afterGet != nil {
+		s.afterGet()
+		s.afterGet = nil
+	}
+	return b, err
+}
+
+// rereadRevisionStore keeps MemStore's revision fence and hooks its re-read.
+type rereadRevisionStore struct {
+	*beads.MemStore
+	hook *rereadHookStore
+}
+
+func (s rereadRevisionStore) Get(id string) (beads.Bead, error) { return s.hook.Get(id) }
+
+// rereadAssignmentStore guards only status and assignee, like BdStore.
+type rereadAssignmentStore struct{ *rereadHookStore }
+
+func (s rereadAssignmentStore) UpdateIfAssignment(id, status, assignee string, opts beads.UpdateOpts) (bool, error) {
+	cur, err := s.Store.Get(id)
+	if err != nil || cur.Status != status || cur.Assignee != assignee {
+		return false, err
+	}
+	return true, s.Update(id, opts)
+}
+
+// A hold landing between the live re-read and the write must not let the
+// retirement move the work, whatever fence the store offers.
+func TestReassignRetiredWorkRefusesHoldAfterReread(t *testing.T) {
+	for _, mode := range []string{"revision", "assignment-only"} {
+		t.Run(mode, func(t *testing.T) {
+			base := beads.NewMemStore()
+			work := createWork(t, base, "in_progress", "old", nil)
+			hook := &rereadHookStore{Store: base}
+			var store beads.Store = rereadRevisionStore{MemStore: base, hook: hook}
+			if mode == "assignment-only" {
+				store = rereadAssignmentStore{hook}
+			}
+			wa := workAssignmentForStore(beads.WorkStore{Store: store})
+			hook.afterGet = func() {
+				if err := base.Update(work.ID, beads.UpdateOpts{Labels: []string{"hold:mayor"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := wa.ReassignRetiredWorkBead(work, "new", retirementWorkHeld); err == nil {
+				t.Fatal("reassignment of work held after the re-read reported success")
+			}
+			if got := mustGet(t, base, work.ID); got.Assignee != "old" {
+				t.Fatalf("held work assignee = %q, want old", got.Assignee)
+			}
+			if mode == "revision" {
+				free := createWork(t, base, "in_progress", "old", nil)
+				if err := wa.ReassignRetiredWorkBead(free, "new", retirementWorkHeld); err != nil {
+					t.Fatalf("standalone reassignment: %v", err)
+				}
+				if got := mustGet(t, base, free.ID); got.Assignee != "new" {
+					t.Fatalf("standalone work assignee = %q, want new", got.Assignee)
+				}
+			}
+		})
+	}
+}

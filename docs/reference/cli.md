@@ -1159,6 +1159,7 @@ gc convoy
 | [gc convoy delete-source](#gc-convoy-delete-source) | Close workflows sourced from a bead |
 | [gc convoy land](#gc-convoy-land) | Land an owned convoy (terminate + cleanup) |
 | [gc convoy list](#gc-convoy-list) | List open convoys with progress |
+| [gc convoy release-pair](#gc-convoy-release-pair) | Release a dead owner's workflow source and step to the pool together |
 | [gc convoy reopen-source](#gc-convoy-reopen-source) | Reopen a source bead after workflow cleanup |
 | [gc convoy status](#gc-convoy-status) | Show detailed convoy status |
 | [gc convoy stranded](#gc-convoy-stranded) | Find convoys with ready work but no workers |
@@ -1338,6 +1339,43 @@ gc convoy list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
+
+## gc convoy release-pair
+
+Return a workflow source and its execution step, both owned by a
+retired session, to their routed pool without creating a new workflow.
+
+The source, input convoy, workflow root, step and finalizer are preserved.
+The command fences both records with hold:mayor, clears the dead owner and
+session bindings, unbinds the root, then releases the source while the step
+is still fenced and finally releases the step. Every phase is a revision
+compare-and-swap with exact read-back, and every phase first re-checks all
+five records, open structural references and session waits against the
+preflight snapshot, refusing on any drift. Reference inventory includes all
+configured work scopes and class bindings. An unavailable, suspended or
+possibly truncated scope refuses the handover rather than being skipped.
+
+Holds present before the run are kept unless named with --clear-hold.
+Progress is persisted to a manifest so an interrupted run resumes from the
+last verified phase, and a write whose outcome cannot be proven exits 2 for
+operator reconciliation instead of retrying. Without --apply the command
+only runs the preflight and prints the plan.
+
+```
+gc convoy release-pair <source-bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply` | bool |  | Perform the handover; without it only the preflight runs |
+| `--clear-hold` | stringSlice |  | Pre-existing hold label the operator is authorized to clear (repeatable) |
+| `--from` | string |  | Assignee recorded on both source and step (required) |
+| `--handover-id` | string |  | Stable handover identifier (default pair-&lt;source&gt;-&lt;step&gt;) |
+| `--json` | bool |  | Output JSON |
+| `--manifest` | string |  | Manifest path (default &lt;city&gt;/.gc/handovers/&lt;handover-id&gt;.json) |
+| `--old-session` | string |  | Closed session bead that held the pair (required) |
+| `--step` | string |  | Execution step bead owned by the same dead owner (required) |
+| `--stop-after` | string |  | Stop after this phase (fence-step, fence-source, prepare-step, prepare-source, prepare-root, release-source, release-step) |
 
 ## gc convoy reopen-source
 

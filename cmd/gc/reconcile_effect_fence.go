@@ -145,17 +145,18 @@ func (p *effectPass) readSignalWork(row session.Info, it intent) *txWork {
 	return &txWork{Free: !has && err == nil, Err: err}
 }
 
-// provedIdle requires a current idle observation and no activity since the
-// pass began. TimedOnly runtimes prove no active protocol turn, not interactive
-// sleep eligibility; Full runtimes retain their quiescence probe.
+// provedIdle requires a current idle observation and the existing activity
+// timestamp check. TimedOnly runtimes prove no active protocol turn, not
+// interactive sleep eligibility. A cross-process activity stamp can lag;
+// these checks do not atomically exclude a turn starting after observation.
 func provedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow time.Time) bool {
 	if resolveSleepCapability(leaf, name) == runtime.SessionSleepCapabilityTimedOnly {
 		tp, ok := leaf.(runtime.TurnFenceProvider)
 		if !ok {
 			return false
 		}
-		idle, read := boundedProbe(ctx, func() bool {
-			turn, err := tp.ObserveTurn(ctx, name)
+		idle, read := boundedProbeCtx(ctx, func(probeCtx context.Context) bool {
+			turn, err := tp.ObserveTurn(probeCtx, name)
 			return err == nil && !turn.Active()
 		})
 		if !read || !idle {

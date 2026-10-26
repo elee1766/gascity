@@ -80,18 +80,19 @@ func TestACPNoWakeDrainRequiresIdleTurn(t *testing.T) {
 			}
 			p, it, store, _ := admittedBeginOn(t, meta, func(e *selectionEntry) { e.Desired = desireSleep }, func(w *World) {
 				w.Env.SP = reader
-				for id, row := range w.Census.Rows {
+				for id := range w.SleepPolicies {
+					row := w.Census.Rows[rowKeyOf(id)]
 					name := row.Info.SessionName
 					if err := owner.Start(context.Background(), name, runtime.Config{
 						Command: holdingACPAgent, WorkDir: t.TempDir(),
-						Env: map[string]string{"GC_SESSION_ID": id.ID, "GC_INSTANCE_TOKEN": row.Info.InstanceToken},
+						Env: map[string]string{"GC_SESSION_ID": id, "GC_INSTANCE_TOKEN": row.Info.InstanceToken},
 					}); err != nil {
 						t.Fatal(err)
 					}
 					t.Cleanup(func() { _ = owner.Stop(name) })
-					w.SleepPolicies[id.ID] = resolveSessionSleepPolicyInfo(row.Info, w.Env.Cfg, reader)
+					w.SleepPolicies[id] = resolveSessionSleepPolicyInfo(row.Info, w.Env.Cfg, reader)
 					w.Now = time.Now()
-					w.Obs = observedOwn(w, id.ID)
+					w.Obs = observedOwn(w, id)
 				}
 			})
 			if it.Kind != wantKind {

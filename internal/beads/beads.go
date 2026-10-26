@@ -105,14 +105,113 @@ var ErrConditionalReleaseUnsupported = errors.New("conditional assignment releas
 // unconditional write. See ConditionalWriter for the full contract.
 var ErrConditionalWriteUnsupported = errors.New("conditional writes unsupported")
 
-// ErrClaimUnsupported reports that a store cannot perform the two-argument
-// compare-and-swap Claim(id, assignee) capability. It is the same shape as
+// ErrClaimUnsupported reports that a store cannot atomically claim a bead.
+// It is the same shape as
 // ErrConditionalReleaseUnsupported: a capability veto a forwarding wrapper
-// (beadPolicyStore, CachingStore, the emitting class store) returns when its
-// inner store does not implement the optional
-// `Claim(id, assignee string) (Bead, bool, error)` interface, rather than a
+// returns when its inner store cannot claim, rather than a
 // conflict or not-found outcome from an inner store that does.
 var ErrClaimUnsupported = errors.New("claim unsupported")
+
+// ErrReclaimUnsupported reports that a store cannot atomically reclaim an
+// assignment using its own stale-lease policy.
+var ErrReclaimUnsupported = errors.New("stale assignment reclaim unsupported")
+
+// AssignmentClaimer atomically assigns an eligible bead to its bound actor.
+// A lost ownership race returns acquired=false without changing the bead.
+// BdStore gets its actor from its original command runner environment. Stores
+// with an explicit-actor claim API use WithClaimActor to bind one immutable actor.
+type AssignmentClaimer interface {
+	Claim(id string) (Bead, bool, error)
+}
+
+type explicitAssignmentClaimer interface {
+	Claim(id, actor string) (Bead, bool, error)
+}
+
+// WithClaimActor binds an explicit-actor backend without modifying the backend.
+// Already bound stores, including BdStore, retain their original actor authority.
+// Stores without an atomic claim capability are returned unchanged.
+func WithClaimActor(store Store, actor string) Store {
+	// Policy wrappers retain their read behavior but identify the claim leaf.
+	if targeter, ok := store.(interface{ AssignmentClaimTarget() Store }); ok {
+		bound := WithClaimActor(targeter.AssignmentClaimTarget(), actor)
+		if claimer, ok := bound.(AssignmentClaimer); ok {
+			return &actorBoundStore{Store: store, claim: claimer.Claim}
+		}
+		return store
+	}
+	if _, ok := store.(AssignmentClaimer); ok {
+		return store
+	}
+	claimer, ok := store.(explicitAssignmentClaimer)
+	if !ok {
+		return store
+	}
+	return &actorBoundStore{Store: store, claim: func(id string) (Bead, bool, error) {
+		return claimer.Claim(id, actor)
+	}}
+}
+
+type actorBoundStore struct {
+	Store
+	claim func(string) (Bead, bool, error)
+}
+
+func (s *actorBoundStore) Claim(id string) (Bead, bool, error) {
+	return s.claim(id)
+}
+
+func (s *actorBoundStore) ReleaseIfCurrent(id, actor string) (bool, error) {
+	releaser, ok := s.Store.(ConditionalAssignmentReleaser)
+	if !ok {
+		return false, ErrConditionalReleaseUnsupported
+	}
+	return releaser.ReleaseIfCurrent(id, actor)
+}
+
+func (s *actorBoundStore) TransferIfCurrent(id, from, to string) (bool, error) {
+	mover, ok := s.Store.(ConditionalAssigneeTransferer)
+	if !ok {
+		return false, ErrConditionalTransferUnsupported
+	}
+	return mover.TransferIfCurrent(id, from, to)
+}
+
+func (s *actorBoundStore) ReclaimStale(id string) (bool, string, error) {
+	reclaimer, ok := s.Store.(StaleAssignmentReclaimer)
+	if !ok {
+		return false, "", ErrReclaimUnsupported
+	}
+	return reclaimer.ReclaimStale(id)
+}
+
+func (s *actorBoundStore) ConditionalWritesResolveTarget() Store { return s.Store }
+
+func (s *actorBoundStore) ConditionalWriterHandle() (ConditionalWriter, bool) {
+	return ConditionalWriterFor(s.Store)
+}
+
+func (s *actorBoundStore) GraphApplyHandle() (GraphApplyStore, bool) {
+	return GraphApplyFor(s.Store)
+}
+
+func (s *actorBoundStore) CloseStore() error {
+	store := s.Store
+	if cached, ok := store.(*CachingStore); ok {
+		cached.StopReconciler()
+		store = cached.Backing()
+	}
+	if closer, ok := store.(interface{ CloseStore() error }); ok {
+		return closer.CloseStore()
+	}
+	return nil
+}
+
+// StaleAssignmentReclaimer releases only a claim the store's lease policy
+// proves stale. It reports whether ownership changed and the previous owner.
+type StaleAssignmentReclaimer interface {
+	ReclaimStale(id string) (bool, string, error)
+}
 
 // ErrBDSilentFallback reports that a bd-backed store operation saw bd exit
 // successfully after falling back to on-disk JSONL auto-import mode. BdStore
@@ -379,14 +478,8 @@ type ConditionalAssignmentReleaser interface {
 // optional capability here: type-assert on the resolved store, never on a
 // wrapper.
 //
-// GROUNDWORK: no production caller depends on this interface yet. Outside
-// the forwarding wrappers, the only production TransferIfCurrent call is
-// cmd/gc's hookClaimRestampWithBdStore, on a BdStore it constructs itself.
-// CachingStore and cmd/gc's emitting class-store wrapper forward the
-// capability. Wrappers that forward ReleaseIfCurrent but not this include
-// ProxiedStore, the cmd/gc policy wrapper and splittest's StrictStore, so a
-// type assertion on any of them fails even over a capable store. Wire them
-// before the first caller relies on the capability through a wrapper.
+// Wrappers must forward this capability explicitly: embedding Store alone
+// hides it even when the underlying store can atomically transfer ownership.
 type ConditionalAssigneeTransferer interface {
 	TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error)
 }

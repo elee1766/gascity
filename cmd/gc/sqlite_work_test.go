@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -46,6 +48,144 @@ prefix = "wrk"
 		t.Fatal(err)
 	}
 	return city, rig, cfg
+}
+
+// Hook operations must use the selected scope's configured provider even when
+// no external bd exists. Raw store tests cannot catch this composition failure.
+func TestHookConfiguredWorkProviderLifecycle(t *testing.T) {
+	for _, provider := range []string{"file", "sqlite-work"} {
+		t.Run(provider, func(t *testing.T) {
+			city, rig, cfg := sqliteWorkTestCity(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("GC_BEADS", provider)
+			if provider == "file" {
+				path := filepath.Join(city, "city.toml")
+				body, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(strings.Replace(string(body), `provider = "sqlite-work"`, `provider = "file"`, 1)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfg, err = loadCityConfigForBdPassthrough(city, &bytes.Buffer{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := ensureScopedFileStoreLayout(city); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, scope := range []string{city, rig} {
+				var err error
+				if provider == "sqlite-work" {
+					err = initSQLiteWorkScope(scope, city)
+				} else {
+					err = ensurePersistedScopeLocalFileStore(scope)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			store, err := openStoreAtForCityWithConfig(rig, city, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = closeBeadStoreHandle(store) })
+			root, err := store.Create(beads.Bead{Title: "workflow root"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := store.Create(beads.Bead{Title: "continuation", Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey: root.ID, beadmeta.ContinuationGroupMetadataKey: "lane",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Create(beads.Bead{Title: "other lane", Metadata: map[string]string{
+				beadmeta.RootBeadIDMetadataKey: root.ID, beadmeta.ContinuationGroupMetadataKey: "other",
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			ops := newHookCity(city, cfg).claimOps()
+			ops.applyDefaults()
+			ctx := context.Background()
+			env := []string{"GC_BEADS=" + provider, "BEADS_DIR=" + filepath.Join(rig, ".beads"), "BD_BIN=" + os.Getenv("BD_BIN")}
+			// Cwd is the city, while BEADS_DIR selects rig work. Every operation
+			// must resolve the same scope rather than silently using city work.
+			read := func() beads.Bead {
+				t.Helper()
+				got, err := ops.ReadWorkMeta(ctx, city, env, step.ID, "worker-one")
+				if err != nil {
+					t.Fatalf("read configured %s hook store: %v", provider, err)
+				}
+				return got
+			}
+			if got := read(); got.Title != step.Title {
+				t.Fatalf("read wrong scoped work: %+v", got)
+			}
+			siblings, err := ops.ListContinuation(ctx, city, env, root.ID, "lane")
+			if err != nil || len(siblings) != 1 || siblings[0].ID != step.ID {
+				t.Fatalf("configured continuation: %+v, %v", siblings, err)
+			}
+			if err := ops.AssignContinuation(ctx, city, env, step.ID, "worker-one"); err != nil {
+				t.Fatal(err)
+			}
+			claim := func() {
+				t.Helper()
+				got, won, err := ops.Claim(ctx, city, env, step.ID, "worker-one")
+				if err != nil || !won || got.Status != "in_progress" || got.Assignee != "worker-one" {
+					t.Fatalf("configured claim: %+v, %t, %v", got, won, err)
+				}
+			}
+			claim()
+			if got, won, err := ops.Claim(ctx, city, env, step.ID, "competitor"); err != nil || won || got.Assignee != "worker-one" {
+				t.Fatalf("claim conflict lost canonical owner: %+v, %t, %v", got, won, err)
+			}
+			if err := ops.StampWorkMeta(ctx, city, env, step.ID, "worker-one", map[string]string{"evidence": "hook"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := read(); got.Metadata["evidence"] != "hook" || got.Metadata[beadmeta.RootBeadIDMetadataKey] != root.ID {
+				t.Fatalf("hook stamp lost work metadata: %+v", got)
+			}
+			if provider == "sqlite-work" {
+				if got := read(); got.Metadata[beads.WorkLeaseExpiresMetadataKey] == "" {
+					t.Fatal("hook claim omitted native work lease")
+				}
+				if reclaimed, _, err := ops.ReclaimStale(ctx, city, env, step.ID); err != nil || reclaimed {
+					t.Fatalf("fresh hook claim reclaimed: %t, %v", reclaimed, err)
+				}
+				expired := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+				if err := store.Update(step.ID, beads.UpdateOpts{Metadata: map[string]string{beads.WorkLeaseExpiresMetadataKey: expired}}); err != nil {
+					t.Fatal(err)
+				}
+				if reclaimed, owner, err := ops.ReclaimStale(ctx, city, env, step.ID); err != nil || !reclaimed || owner != "worker-one" {
+					t.Fatalf("expired hook claim not reclaimed: %t, %q, %v", reclaimed, owner, err)
+				}
+				claim()
+			} else {
+				if reclaimed, owner, err := ops.ReclaimStale(ctx, city, env, step.ID); err != nil || reclaimed || owner != "" {
+					t.Fatalf("lease-free provider must remain usable: %t, %q, %v", reclaimed, owner, err)
+				}
+			}
+			if moved, err := ops.RestampAdopted(ctx, city, env, step.ID, "worker-one", "canonical"); err != nil || !moved {
+				t.Fatalf("configured owner transfer: %t, %v", moved, err)
+			}
+			if released, err := ops.Release(ctx, city, env, step.ID, "worker-one"); err != nil || released {
+				t.Fatalf("stale hook owner released transferred work: %t, %v", released, err)
+			}
+			if released, err := ops.Release(ctx, city, env, step.ID, "canonical"); err != nil || !released {
+				t.Fatalf("configured claim release: %t, %v", released, err)
+			}
+			if got := read(); got.Status != "open" || got.Assignee != "" || got.Metadata["evidence"] != "hook" {
+				t.Fatalf("released work not durable: %+v", got)
+			}
+			workflow := ops.WorkflowStore(ctx, city, env, root.ID, "")
+			defer closeHookWorkflowStore(workflow)
+			if got, err := workflow.Get(root.ID); err != nil || got.Title != root.Title {
+				t.Fatalf("workflow read used another provider or scope: %+v, %v", got, err)
+			}
+		})
+	}
 }
 
 func TestSQLiteWorkRigAddUnconfiguredScope(t *testing.T) {

@@ -1198,6 +1198,11 @@ func TestBdStoreClaimReturnsClaimedBead(t *testing.T) {
 	if got := strings.Join(gotArgs, " "); got != "update bd-42 --claim --json" {
 		t.Fatalf("args = %q, want bd claim update args", got)
 	}
+	bound := beads.WithClaimActor(s, "different-actor")
+	claimed, ok, err = bound.(beads.AssignmentClaimer).Claim("bd-42")
+	if err != nil || !ok || claimed.Assignee != "worker-1" {
+		t.Fatalf("actor-bound claim = %+v, %v, %v", claimed, ok, err)
+	}
 }
 
 func TestBdStoreClaimConflictReturnsFalse(t *testing.T) {

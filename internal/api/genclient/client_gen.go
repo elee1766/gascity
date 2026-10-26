@@ -1835,6 +1835,7 @@ type AgentPatch struct {
 	MinActiveSessions       *int64             `json:"MinActiveSessions"`
 	MouseMode               *string            `json:"MouseMode"`
 	Name                    string             `json:"Name"`
+	Namepool                *string            `json:"Namepool"`
 	Nudge                   *string            `json:"Nudge"`
 	OptionDefaults          *map[string]string `json:"OptionDefaults,omitempty"`
 	OverlayDir              *string            `json:"OverlayDir"`

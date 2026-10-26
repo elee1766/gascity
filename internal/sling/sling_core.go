@@ -77,6 +77,18 @@ func DoSling(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, 
 
 	beadID := opts.BeadOrFormula
 
+	if reassignment != nil {
+		deps.Store = reassignment.store
+		deps.StoreRef = reassignment.storeRef
+		return withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
+			if err := reassignment.validateStandalone(opts, deps); err != nil {
+				return result, err
+			}
+			deps.Router = reassignmentRouter{pending: reassignment, router: deps.Router, cfg: deps.Cfg}
+			return slingPlainBead(opts, deps, beadID, result)
+		})
+	}
+
 	var err error
 	switch {
 	case opts.IsFormula:
@@ -87,11 +99,6 @@ func DoSling(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, 
 		result, err = slingDefaultFormula(opts, deps, querier, beadID, result)
 	default:
 		result, err = slingPlainBead(opts, deps, beadID, result)
-	}
-	if err == nil && reassignment != nil {
-		if err = reassignment.commit(); err != nil {
-			return result, fmt.Errorf("routing succeeded but reassignment of %s was refused: %w", beadID, err)
-		}
 	}
 	return result, err
 }
@@ -270,7 +277,7 @@ func shouldGuardCrossRig(opts SlingOpts) bool {
 }
 
 func shouldCheckBeadState(opts SlingOpts) bool {
-	return !opts.IsFormula && !opts.Force && (!opts.DryRun || !opts.InlineText)
+	return !opts.IsFormula && !opts.Reassign && !opts.Force && (!opts.DryRun || !opts.InlineText)
 }
 
 // attachmentDecision is the result of onFormulaNeedsAttachment: whether an
@@ -2202,11 +2209,11 @@ func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {
 	return b, b.Type == "epic" || beads.IsContainerType(b.Type)
 }
 
-// preparedReassignment keeps the original owner until routing has succeeded.
-// The commit rereads the record and refuses a changed claim or hold.
+// preparedReassignment pins the source revision before any routing publication.
 type preparedReassignment struct {
-	store  beads.Store
-	before beads.Bead
+	store    beads.Store
+	storeRef string
+	before   beads.Bead
 }
 
 // prepareReassignment locates the source without changing its ownership.
@@ -2214,7 +2221,7 @@ func prepareReassignment(beadID string, deps SlingDeps) (*preparedReassignment, 
 	if deps.Store != nil {
 		b, err := deps.Store.Get(beadID)
 		if err == nil {
-			return &preparedReassignment{store: deps.Store, before: b}, nil
+			return &preparedReassignment{store: deps.Store, storeRef: deps.StoreRef, before: b}, nil
 		}
 		if !errors.Is(err, beads.ErrNotFound) {
 			return nil, fmt.Errorf("reading %s from primary store to reopen for reassign: %w", beadID, err)
@@ -2245,35 +2252,124 @@ func prepareReassignment(beadID string, deps SlingDeps) (*preparedReassignment, 
 			}
 			return nil, fmt.Errorf("reading %s from store %q to reopen for reassign: %w", beadID, strings.TrimSpace(info.StoreRef), err)
 		}
-		return &preparedReassignment{store: info.Store, before: b}, nil
+		return &preparedReassignment{store: info.Store, storeRef: info.StoreRef, before: b}, nil
 	}
 	return nil, nil
 }
 
-func (p *preparedReassignment) commit() error {
-	b, err := p.store.Get(p.before.ID)
+func (p *preparedReassignment) validateStandalone(opts SlingOpts, deps SlingDeps) error {
+	refuse := func(reason string) error {
+		return fmt.Errorf("reassign %s: %s; linked ownership transfer requires coordinated handoff", p.before.ID, reason)
+	}
+	if usesFormulaBackedRoute(opts) {
+		return refuse("formula-backed reassignment is not atomic")
+	}
+	if IsCustomSlingQuery(opts.Target) {
+		return refuse("custom routing does not support atomic reassignment")
+	}
+	if deps.Router != nil {
+		if _, ok := deps.Router.(AtomicReassignmentRouter); !ok {
+			return refuse("router does not support atomic reassignment")
+		}
+	}
+	b := p.before
+	if b.Status != "open" && b.Status != "in_progress" {
+		return refuse("source is not open or in progress")
+	}
+	if b.ParentID != "" || b.Type != "task" || IsAttachedRoot(b) {
+		return refuse("source is not a standalone task")
+	}
+	for _, label := range b.Labels {
+		if strings.HasPrefix(label, "hold:") {
+			return refuse("source has an explicit hold")
+		}
+	}
+	linkKeys := []string{beadmeta.MoleculeIDMetadataKey, "workflow_id", beadmeta.RootBeadIDMetadataKey, beadmeta.SourceBeadIDMetadataKey, beadmeta.InputConvoyIDMetadataKey, "gc.execution_routed_to", beadmeta.SessionIDMetadataKey, beadmeta.SessionIDCamelMetadataKey, beadmeta.SessionNameMetadataKey, beadmeta.SessionNameCamelMetadataKey}
+	linkKeys = append(linkKeys, beadmeta.SessionAffinityMetadataKeys...)
+	for _, key := range linkKeys {
+		if strings.TrimSpace(b.Metadata[key]) != "" {
+			return refuse("source has workflow or session linkage")
+		}
+	}
+	children, err := p.store.List(beads.ListQuery{ParentID: b.ID})
 	if err != nil {
 		return err
 	}
-	if b.Assignee != p.before.Assignee || b.Status != p.before.Status ||
-		b.ClaimFence != p.before.ClaimFence || !slices.Equal(b.Labels, p.before.Labels) {
-		return fmt.Errorf("source %s changed during routing; original ownership was not released", b.ID)
+	if len(children) != 0 {
+		return refuse("source has child records")
 	}
-	var update beads.UpdateOpts
-	if strings.TrimSpace(b.Assignee) != "" {
-		empty := ""
-		update.Assignee = &empty
+	links, err := p.store.DepList(b.ID, "up")
+	if err != nil {
+		return err
 	}
-	if b.Status == "in_progress" {
+	for _, link := range links {
+		if link.Type == convoycore.TrackingDepType {
+			return refuse("source belongs to a convoy")
+		}
+	}
+	if deps.GraphStore != nil {
+		graphChildren, err := deps.GraphStore.List(beads.ListQuery{ParentID: b.ID})
+		if err != nil {
+			return err
+		}
+		if len(graphChildren) != 0 {
+			return refuse("source has graph children")
+		}
+		graphRoots, err := deps.GraphStore.ListByMetadata(map[string]string{beadmeta.SourceBeadIDMetadataKey: b.ID}, 0, beads.WithBothTiers)
+		if err != nil {
+			return err
+		}
+		for _, root := range graphRoots {
+			if !convoycore.IsTerminalStatus(root.Status) {
+				return refuse("source has a graph workflow")
+			}
+		}
+	}
+	strictDeps := deps
+	strictDeps.SourceWorkflowStoreScanWarning = nil
+	roots, err := listSourceWorkflowRoots(strictDeps, b.ID)
+	if err != nil {
+		return err
+	}
+	if len(roots) != 0 {
+		return refuse("source has a live workflow")
+	}
+	return nil
+}
+
+type reassignmentRouter struct {
+	pending *preparedReassignment
+	router  BeadRouter
+	cfg     *config.City
+}
+
+func (r reassignmentRouter) Route(ctx context.Context, req RouteRequest) error {
+	req.Store = r.pending.store
+	if router, ok := r.router.(AtomicReassignmentRouter); ok {
+		return router.Reassign(ctx, req, r.pending.before)
+	}
+	req.Target = agentutil.NormalizePoolRouteTarget(r.cfg, req.Target)
+	return CommitReassignment(req, r.pending.before)
+}
+
+// CommitReassignment publishes a built-in route and releases its source owner
+// in one write pinned to the originally observed revision. It never retries.
+func CommitReassignment(req RouteRequest, before beads.Bead) error {
+	if req.Store == nil || req.BeadID != before.ID || strings.TrimSpace(req.Target) == "" {
+		return fmt.Errorf("invalid atomic reassignment target")
+	}
+	writer, ok := beads.ConditionalWriterForTarget(req.Store)
+	if !ok || before.Revision <= 0 {
+		return fmt.Errorf("source %s does not support revision-fenced reassignment", before.ID)
+	}
+	empty := ""
+	update := beads.UpdateOpts{
+		Assignee: &empty,
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: req.Target},
+	}
+	if before.Status == "in_progress" {
 		open := "open"
 		update.Status = &open
 	}
-	if update.Assignee == nil && update.Status == nil {
-		return nil
-	}
-	writer, ok := beads.ConditionalWriterForTarget(p.store)
-	if !ok || b.Revision == 0 {
-		return fmt.Errorf("source %s does not support revision-fenced reassignment", b.ID)
-	}
-	return writer.UpdateIfMatch(b.ID, b.Revision, update)
+	return writer.UpdateIfMatch(before.ID, before.Revision, update)
 }

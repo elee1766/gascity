@@ -3075,9 +3075,8 @@ func TestSlingReassignRejectedWorkflowPreservesOwnership(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{Reassign: true})
-			var conflict *sourceworkflow.ConflictError
-			if !errors.As(err, &conflict) {
-				t.Fatalf("reassign error = %v, want live workflow conflict", err)
+			if err == nil {
+				t.Fatal("formula-backed reassignment unexpectedly succeeded")
 			}
 			after, err := store.Get(source.ID)
 			if err != nil {
@@ -3089,6 +3088,61 @@ func TestSlingReassignRejectedWorkflowPreservesOwnership(t *testing.T) {
 			root, err := deps.graphStore().Get(first.WorkflowID)
 			if err != nil || convoycore.IsTerminalStatus(root.Status) {
 				t.Fatalf("original workflow lost: root=%+v err=%v", root, err)
+			}
+		})
+	}
+}
+
+func TestStandaloneReassignmentIsAtomic(t *testing.T) {
+	for _, scenario := range []string{"standalone", "hold", "session", "convoy", "formula", "custom"} {
+		t.Run(scenario, func(t *testing.T) {
+			store, err := beads.OpenSQLiteWorkStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("wrk"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.CloseStore() })
+			cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+			deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+			deps.Store, deps.CityPath = store, t.TempDir()
+			source, err := store.Create(beads.Bead{Title: "owned task", Type: "task", Assignee: "original", Status: "in_progress"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := SlingOpts{Target: config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, BeadOrFormula: source.ID, Reassign: true, NoFormula: true, NoConvoy: true}
+			switch scenario {
+			case "hold":
+				err = store.Update(source.ID, beads.UpdateOpts{Labels: []string{"hold:mayor"}})
+			case "session":
+				err = store.SetMetadata(source.ID, "gc.session_id", "original-session")
+			case "convoy":
+				var convoy beads.Bead
+				convoy, err = store.Create(beads.Bead{Title: "input", Type: "convoy"})
+				if err == nil {
+					err = convoycore.TrackItem(store, convoy.ID, source.ID)
+				}
+			case "formula":
+				opts.OnFormula = "not-even-loaded"
+			case "custom":
+				opts.Target.SlingQuery = "echo custom"
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.Get(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = DoSling(opts, deps, nil)
+			after, readErr := store.Get(source.ID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if scenario == "standalone" {
+				if err != nil || after.Assignee != "" || after.Status != "open" || after.Metadata[beadmeta.RoutedToMetadataKey] != "mayor" || after.Revision != before.Revision+1 {
+					t.Fatalf("handoff was not one coherent write: before=%+v after=%+v err=%v", before, after, err)
+				}
+			} else if err == nil || after.Revision != before.Revision || after.Assignee != before.Assignee || after.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+				t.Fatalf("protected handoff changed state: before=%+v after=%+v err=%v", before, after, err)
 			}
 		})
 	}
@@ -3132,14 +3186,14 @@ func TestPreparedReassignmentPreservesChangedClaim(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := pending.commit(); err == nil {
+			if err := CommitReassignment(RouteRequest{BeadID: pending.before.ID, Target: "myrig/polecat", Store: pending.store}, pending.before); err == nil {
 				t.Fatal("changed claim was released")
 			}
 			after, err := store.Get(source.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if after.Revision != before.Revision || after.Assignee != before.Assignee || after.Status != before.Status || !slices.Equal(after.Labels, before.Labels) {
+			if after.Revision != before.Revision || after.Assignee != before.Assignee || after.Status != before.Status || !slices.Equal(after.Labels, before.Labels) || after.Metadata[beadmeta.RoutedToMetadataKey] != before.Metadata[beadmeta.RoutedToMetadataKey] {
 				t.Fatalf("reassignment overwrote a concurrent change: before=%+v after=%+v", before, after)
 			}
 		})
@@ -4965,6 +5019,7 @@ func reassignTestSetup(t *testing.T, assignee string) (SlingOpts, SlingDeps, bea
 	}
 	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.StoreRef = "rig:myrig"
 	bead, err := deps.Store.Create(beads.Bead{Title: "task", Type: "task", Assignee: assignee})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -5053,7 +5108,7 @@ func TestReopenForReassign_RigStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareReassignment: %v", err)
 	}
-	if err := pending.commit(); err != nil {
+	if err := CommitReassignment(RouteRequest{BeadID: pending.before.ID, Target: "myrig/polecat", Store: pending.store}, pending.before); err != nil {
 		t.Fatalf("commit reassignment: %v", err)
 	}
 	got, err := rigStore.Get(bead.ID)
@@ -5182,7 +5237,7 @@ func TestReopenForReassign_NilPrimaryStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareReassignment: %v", err)
 	}
-	if err := pending.commit(); err != nil {
+	if err := CommitReassignment(RouteRequest{BeadID: pending.before.ID, Target: "myrig/polecat", Store: pending.store}, pending.before); err != nil {
 		t.Fatalf("commit reassignment: %v", err)
 	}
 	got, err := rigStore.Get(bead.ID)

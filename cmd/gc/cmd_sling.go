@@ -150,7 +150,7 @@ Examples:
 	cmd.Flags().StringVar(&merge, "merge", "", "merge strategy: direct, mr, or local")
 	cmd.Flags().BoolVar(&noConvoy, "no-convoy", false, "skip auto-convoy creation")
 	cmd.Flags().BoolVar(&owned, "owned", false, "mark auto-convoy as owned (skip auto-close)")
-	cmd.Flags().BoolVar(&reassign, "reassign", false, "clear any existing human assignee before routing (for human→pool handoff)")
+	cmd.Flags().BoolVar(&reassign, "reassign", false, "atomically route and release the owner of a standalone task (linked workflows refused)")
 	cmd.Flags().StringVar(&onFormula, "on", "", "attach wisp from formula to bead before routing")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "show what would be done without executing")
 	cmd.Flags().BoolVar(&noFormula, "no-formula", false, "suppress default formula (route raw bead)")
@@ -745,6 +745,19 @@ func (cliNotifier) PokeControlDispatch(cityPath string) {
 
 type cliBeadRouter struct {
 	deps *slingDeps
+}
+
+func (r cliBeadRouter) Reassign(_ context.Context, req sling.RouteRequest, before beads.Bead) error {
+	if r.deps == nil {
+		return fmt.Errorf("sling router: missing dependencies")
+	}
+	if r.deps.Cfg != nil {
+		if agentCfg, ok := findAgentByQualified(r.deps.Cfg, req.Target); ok && isCustomSlingQuery(agentCfg) {
+			return fmt.Errorf("custom sling_query does not support atomic reassignment")
+		}
+		req.Target = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)
+	}
+	return sling.CommitReassignment(req, before)
 }
 
 func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {

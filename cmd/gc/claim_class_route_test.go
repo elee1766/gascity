@@ -85,6 +85,59 @@ func (s claimRouteFailingStore) Claim(id, assignee string) (beads.Bead, bool, er
 	return claimer.Claim(id, assignee)
 }
 
+func TestClassRoutedWorkflowInputUsesGraphResidence(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		t.Run(fmt.Sprintf("terminal=%v", terminal), func(t *testing.T) {
+			graph := newClaimRouteClassStore(t)
+			work := newClaimRouteClassStore(t)
+			for _, b := range []beads.Bead{
+				{ID: "gcg-200", Title: "input", Type: "convoy"},
+				{ID: "gcg-201", Title: "workflow", Type: "task", Metadata: map[string]string{beadmeta.InputConvoyIDMetadataKey: "gcg-200"}},
+				{ID: "gcg-202", Title: "delivery", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-201"}},
+				{ID: "gcg-203", Title: "input member", Type: "task", ParentID: "gcg-200"},
+			} {
+				if _, err := graph.Create(b); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if terminal {
+				status := "closed"
+				if err := graph.Update("gcg-203", beads.UpdateOpts{Status: &status}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ops := classRoutedHookClaimOps(hookClaimOps{
+				ReadWorkMeta: func(_ context.Context, _ string, _ []string, id, _ string) (beads.Bead, error) {
+					return work.Get(id)
+				},
+				InputDone: func(_ context.Context, _ string, _ []string, b beads.Bead, ids []string) (string, bool, error) {
+					return workflowInputDone(work, b, ids)
+				},
+				SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, id string) error {
+					return skipDoneWorkflow(work, id)
+				},
+			}, newClaimRouteFor(t, graph))
+			step, err := graph.Get("gcg-202")
+			if err != nil {
+				t.Fatal(err)
+			}
+			root, done, err := ops.InputDone(context.Background(), "/work", nil, step, []string{"worker-1"})
+			if err != nil || root != "gcg-201" || done != terminal {
+				t.Fatalf("InputDone = (%q, %v, %v), want graph root and done=%v", root, done, err, terminal)
+			}
+			if terminal {
+				if err := ops.SkipDoneWorkflow(context.Background(), "/work", nil, root); err != nil {
+					t.Fatal(err)
+				}
+				got, err := graph.Get(step.ID)
+				if err != nil || got.Status != "closed" {
+					t.Fatalf("graph delivery = (%s, %v), want closed", got.Status, err)
+				}
+			}
+		})
+	}
+}
+
 func TestClassRoutedClaimEscalatesOnlyOnNotFound(t *testing.T) {
 	class := newClaimRouteClassStore(t)
 	mintClaimRouteBead(t, class, "gcg-100", nil)

@@ -690,6 +690,35 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		}
 	}
 
+	// Input ancestry lives with the candidate, not necessarily in its logical
+	// rig's work store. Use the same proven residence as the claim read path.
+	ops.InputDone = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identities []string) (string, bool, error) {
+		if candidate.Metadata[beadmeta.RootBeadIDMetadataKey] == "" && candidate.Metadata[beadmeta.InputConvoyIDMetadataKey] == "" {
+			return base.InputDone(ctx, dir, env, candidate, identities)
+		}
+		current, err := ops.ReadWorkMeta(ctx, dir, env, candidate.ID, "")
+		if err != nil {
+			return "", false, err
+		}
+		if !route.knownResident(candidate.ID) {
+			return base.InputDone(ctx, dir, env, current, identities)
+		}
+		rootID, done, err := workflowInputDone(route.class, current, identities)
+		if err == nil && rootID != "" {
+			route.resident[rootID] = true
+		}
+		return rootID, done, err
+	}
+	ops.SkipDoneWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
+		if route.knownResident(rootID) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return skipDoneWorkflow(route.class, rootID)
+		}
+		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
+	}
+
 	// A continuation LIST is the one claim-time call with no not-found to
 	// escalate on: a query against a store that holds no member of the group
 	// returns an empty list, not an error. Escalating on EMPTY is what keeps

@@ -359,6 +359,12 @@
           "Name": {
             "type": "string"
           },
+          "Namepool": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "Nudge": {
             "type": [
               "string",
@@ -551,6 +557,7 @@
           "EnvRemove",
           "PreStart",
           "PromptTemplate",
+          "Namepool",
           "Session",
           "Provider",
           "Upstream",

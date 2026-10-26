@@ -193,6 +193,7 @@
               "guides/gastown-config-recipes",
               "guides/using-json-from-gc",
               "guides/connected-clients",
+              "guides/conversation-telemetry",
               "guides/multi-agent-engineering-environment"
             ]
           }

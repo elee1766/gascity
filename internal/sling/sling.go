@@ -57,11 +57,8 @@ type SlingOpts struct {
 	Nudge         bool
 	Force         bool
 	DryRun        bool
-	// Reassign clears any existing human assignee on the bead before
-	// routing so the target pool/agent can claim it. Without this, a
-	// bead claimed by a human (`bd update --claim`) stays invisible
-	// to the pool's claim filter even after sling sets gc.routed_to.
-	// See gastownhall/gascity#1007.
+	// Reassign atomically publishes a built-in route and releases ownership of
+	// a standalone task. Linked, held and formula-backed transfers are refused.
 	Reassign bool
 	// InlineText is set only by the CLI path for ad-hoc task text. API
 	// callers always provide explicit bead or formula references.
@@ -91,6 +88,12 @@ type Notifier interface {
 // Replaces the shell-string SlingRunner for callers using the intent API.
 type BeadRouter interface {
 	Route(ctx context.Context, req RouteRequest) error
+}
+
+// AtomicReassignmentRouter combines route publication and source ownership
+// release in a single write against the original revision, without retrying.
+type AtomicReassignmentRouter interface {
+	Reassign(ctx context.Context, req RouteRequest, before beads.Bead) error
 }
 
 // SourceWorkflowStore is one entry from the list of bead stores the sling
@@ -268,10 +271,7 @@ type RouteOpts struct {
 	Merge    string // "", "direct", "mr", "local"
 	NoConvoy bool
 	Owned    bool
-	// Reassign clears any existing human assignee on the bead before routing,
-	// so a sling can hand a bead claimed via `bd update --claim` to a new
-	// target's pool. Mapped straight to SlingOpts.Reassign; without it neither
-	// RouteBead nor the API sling path can express --reassign. See #1007.
+	// Reassign requests the standalone atomic handoff described by SlingOpts.
 	Reassign bool
 	Nudge    bool
 	Force    bool
@@ -299,12 +299,8 @@ type FormulaOpts struct {
 	// formula paths honor the wire no_convoy/owned fields.
 	NoConvoy bool
 	Owned    bool
-	// Reassign clears any existing human assignee before routing. Meaningful
-	// on AttachFormula (an existing bead may be claimed, and the attach route
-	// is !IsFormula); a guaranteed no-op on a fresh LaunchFormula, whose
-	// IsFormula route is skipped by shouldReopenForReassign so the formula name
-	// is never mistaken for a bead ID. Kept here so the API formula paths honor
-	// the wire reassign field, matching RouteOpts.
+	// Reassign is refused on AttachFormula until linked ownership can transfer
+	// atomically. It is a no-op on LaunchFormula, whose input is not a bead ID.
 	Reassign  bool
 	DryRun    bool
 	SkipPoke  bool

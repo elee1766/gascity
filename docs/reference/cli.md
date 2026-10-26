@@ -4908,7 +4908,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--nudge` | bool |  | nudge target after routing |
 | `--on` | string |  | attach wisp from formula to bead before routing |
 | `--owned` | bool |  | mark auto-convoy as owned (skip auto-close) |
-| `--reassign` | bool |  | clear any existing human assignee before routing (for human→pool handoff) |
+| `--reassign` | bool |  | atomically route and release the owner of a standalone task (linked workflows refused) |
 | `--scope-kind` | string |  | logical workflow scope kind for formulas v2 launches |
 | `--scope-ref` | string |  | logical workflow scope ref for formulas v2 launches |
 | `--stdin` | bool |  | read bead text from stdin (first line = title, rest = description) |

@@ -604,6 +604,19 @@ type apiBeadRouter struct {
 	store  beads.Store
 }
 
+func (r apiBeadRouter) Reassign(_ context.Context, req sling.RouteRequest, before beads.Bead) error {
+	if r.server == nil {
+		return fmt.Errorf("sling router: missing server")
+	}
+	if cfg := r.server.state.Config(); cfg != nil {
+		if agentCfg, ok := findAgentByQualifiedTemplate(cfg, req.Target); ok && sling.IsCustomSlingQuery(agentCfg) {
+			return fmt.Errorf("custom sling_query does not support atomic reassignment")
+		}
+		req.Target = agentutil.NormalizePoolRouteTarget(cfg, req.Target)
+	}
+	return sling.CommitReassignment(req, before)
+}
+
 func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.server == nil {
 		return fmt.Errorf("sling router: missing server")

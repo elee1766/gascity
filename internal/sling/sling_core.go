@@ -59,6 +59,14 @@ func DoSling(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, 
 		return SlingResult{}, err
 	}
 	a := opts.Target
+	var reassignment *preparedReassignment
+	if shouldReopenForReassign(opts) {
+		var err error
+		reassignment, err = prepareReassignment(opts.BeadOrFormula, deps)
+		if err != nil {
+			return SlingResult{}, err
+		}
+	}
 	result, preErr := preflight(opts, deps, querier)
 	if preErr != nil {
 		return result, preErr
@@ -69,16 +77,30 @@ func DoSling(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult, 
 
 	beadID := opts.BeadOrFormula
 
+	if reassignment != nil {
+		deps.Store = reassignment.store
+		deps.StoreRef = reassignment.storeRef
+		return withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
+			if err := reassignment.validateStandalone(opts, deps); err != nil {
+				return result, err
+			}
+			deps.Router = reassignmentRouter{pending: reassignment, router: deps.Router, cfg: deps.Cfg}
+			return slingPlainBead(opts, deps, beadID, result)
+		})
+	}
+
+	var err error
 	switch {
 	case opts.IsFormula:
-		return slingFormula(opts, deps)
+		result, err = slingFormula(opts, deps)
 	case opts.OnFormula != "":
-		return slingOnFormula(opts, deps, querier, beadID, result)
+		result, err = slingOnFormula(opts, deps, querier, beadID, result)
 	case !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "":
-		return slingDefaultFormula(opts, deps, querier, beadID, result)
+		result, err = slingDefaultFormula(opts, deps, querier, beadID, result)
 	default:
-		return slingPlainBead(opts, deps, beadID, result)
+		result, err = slingPlainBead(opts, deps, beadID, result)
 	}
+	return result, err
 }
 
 // preflight performs warnings, idempotency check, dry-run short-circuit,
@@ -126,19 +148,6 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
 		if err := validateBuiltInRouteStoreReachable(deps, opts.BeadOrFormula, a); err != nil {
 			return result, fmt.Errorf("%w", err)
-		}
-	}
-
-	// Reassign: make the bead claimable by the target pool/agent before
-	// routing — clear any existing assignee and reopen it if a prior actor
-	// left it in_progress. Without this, a bead claimed by `bd update --claim`
-	// (status=in_progress, assignee=<actor>) stays invisible to the pool's
-	// claim filter even after sling sets gc.routed_to: clearing the assignee
-	// alone is not enough because IsReadyCandidate requires status=open. See
-	// gastownhall/gascity#1007 (assignee) and #3231 (status).
-	if shouldReopenForReassign(opts) {
-		if err := reopenForReassign(opts.BeadOrFormula, deps); err != nil {
-			return result, fmt.Errorf("reopening %s for reassign: %w", opts.BeadOrFormula, err)
 		}
 	}
 
@@ -268,7 +277,7 @@ func shouldGuardCrossRig(opts SlingOpts) bool {
 }
 
 func shouldCheckBeadState(opts SlingOpts) bool {
-	return !opts.IsFormula && !opts.Force && (!opts.DryRun || !opts.InlineText)
+	return !opts.IsFormula && !opts.Reassign && !opts.Force && (!opts.DryRun || !opts.InlineText)
 }
 
 // attachmentDecision is the result of onFormulaNeedsAttachment: whether an
@@ -2200,24 +2209,22 @@ func selectedStoreContainer(opts SlingOpts, deps SlingDeps) (beads.Bead, bool) {
 	return b, b.Type == "epic" || beads.IsContainerType(b.Type)
 }
 
-// reopenForReassign makes a bead claimable by a target pool before routing:
-// it clears any assignee and reopens the bead if a prior actor left it
-// in_progress. It checks the city primary store (deps.Store) first; if the
-// bead is not there it sweeps the source-workflow stores
-// (deps.SourceWorkflowStores) so rig-prefixed beads — whose record lives in a
-// rig store, not deps.Store — are still reopened. No-op when the bead is
-// already open and unassigned, no store is available, or the bead is absent
-// from every store. Errors on a real primary-store read failure, a store-Update
-// failure, or a SourceWorkflowStores listing/read failure. See
-// SlingOpts.Reassign, #1007, #3408 (assignee), and #3231 (status).
-func reopenForReassign(beadID string, deps SlingDeps) error {
+// preparedReassignment pins the source revision before any routing publication.
+type preparedReassignment struct {
+	store    beads.Store
+	storeRef string
+	before   beads.Bead
+}
+
+// prepareReassignment locates the source without changing its ownership.
+func prepareReassignment(beadID string, deps SlingDeps) (*preparedReassignment, error) {
 	if deps.Store != nil {
 		b, err := deps.Store.Get(beadID)
 		if err == nil {
-			return reopenForReassignInStore(deps.Store, beadID, b)
+			return &preparedReassignment{store: deps.Store, storeRef: deps.StoreRef, before: b}, nil
 		}
 		if !errors.Is(err, beads.ErrNotFound) {
-			return fmt.Errorf("reading %s from primary store to reopen for reassign: %w", beadID, err)
+			return nil, fmt.Errorf("reading %s from primary store to reopen for reassign: %w", beadID, err)
 		}
 		// ErrNotFound: the record is not in the city primary store. For
 		// rig-prefixed beads it lives in a rig store, so fall through to the
@@ -2228,11 +2235,11 @@ func reopenForReassign(beadID string, deps SlingDeps) error {
 	// which likewise consults the workflow stores when deps.Store lacks (or
 	// omits) the bead.
 	if deps.SourceWorkflowStores == nil {
-		return nil
+		return nil, nil
 	}
 	stores, err := deps.SourceWorkflowStores()
 	if err != nil {
-		return fmt.Errorf("listing source-workflow stores to reopen %s for reassign: %w", beadID, err)
+		return nil, fmt.Errorf("listing source-workflow stores to reopen %s for reassign: %w", beadID, err)
 	}
 	for _, info := range stores {
 		if info.Store == nil {
@@ -2243,32 +2250,126 @@ func reopenForReassign(beadID string, deps SlingDeps) error {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return fmt.Errorf("reading %s from store %q to reopen for reassign: %w", beadID, strings.TrimSpace(info.StoreRef), err)
+			return nil, fmt.Errorf("reading %s from store %q to reopen for reassign: %w", beadID, strings.TrimSpace(info.StoreRef), err)
 		}
-		return reopenForReassignInStore(info.Store, beadID, b)
+		return &preparedReassignment{store: info.Store, storeRef: info.StoreRef, before: b}, nil
+	}
+	return nil, nil
+}
+
+func (p *preparedReassignment) validateStandalone(opts SlingOpts, deps SlingDeps) error {
+	refuse := func(reason string) error {
+		return fmt.Errorf("reassign %s: %s; linked ownership transfer requires coordinated handoff", p.before.ID, reason)
+	}
+	if usesFormulaBackedRoute(opts) {
+		return refuse("formula-backed reassignment is not atomic")
+	}
+	if IsCustomSlingQuery(opts.Target) {
+		return refuse("custom routing does not support atomic reassignment")
+	}
+	if deps.Router != nil {
+		if _, ok := deps.Router.(AtomicReassignmentRouter); !ok {
+			return refuse("router does not support atomic reassignment")
+		}
+	}
+	b := p.before
+	if b.Status != "open" && b.Status != "in_progress" {
+		return refuse("source is not open or in progress")
+	}
+	if b.ParentID != "" || b.Type != "task" || IsAttachedRoot(b) {
+		return refuse("source is not a standalone task")
+	}
+	for _, label := range b.Labels {
+		if strings.HasPrefix(label, "hold:") {
+			return refuse("source has an explicit hold")
+		}
+	}
+	linkKeys := []string{beadmeta.MoleculeIDMetadataKey, "workflow_id", beadmeta.RootBeadIDMetadataKey, beadmeta.SourceBeadIDMetadataKey, beadmeta.InputConvoyIDMetadataKey, "gc.execution_routed_to", beadmeta.SessionIDMetadataKey, beadmeta.SessionIDCamelMetadataKey, beadmeta.SessionNameMetadataKey, beadmeta.SessionNameCamelMetadataKey}
+	linkKeys = append(linkKeys, beadmeta.SessionAffinityMetadataKeys...)
+	for _, key := range linkKeys {
+		if strings.TrimSpace(b.Metadata[key]) != "" {
+			return refuse("source has workflow or session linkage")
+		}
+	}
+	children, err := p.store.List(beads.ListQuery{ParentID: b.ID})
+	if err != nil {
+		return err
+	}
+	if len(children) != 0 {
+		return refuse("source has child records")
+	}
+	links, err := p.store.DepList(b.ID, "up")
+	if err != nil {
+		return err
+	}
+	for _, link := range links {
+		if link.Type == convoycore.TrackingDepType {
+			return refuse("source belongs to a convoy")
+		}
+	}
+	if deps.GraphStore != nil {
+		graphChildren, err := deps.GraphStore.List(beads.ListQuery{ParentID: b.ID})
+		if err != nil {
+			return err
+		}
+		if len(graphChildren) != 0 {
+			return refuse("source has graph children")
+		}
+		graphRoots, err := deps.GraphStore.ListByMetadata(map[string]string{beadmeta.SourceBeadIDMetadataKey: b.ID}, 0, beads.WithBothTiers)
+		if err != nil {
+			return err
+		}
+		for _, root := range graphRoots {
+			if !convoycore.IsTerminalStatus(root.Status) {
+				return refuse("source has a graph workflow")
+			}
+		}
+	}
+	strictDeps := deps
+	strictDeps.SourceWorkflowStoreScanWarning = nil
+	roots, err := listSourceWorkflowRoots(strictDeps, b.ID)
+	if err != nil {
+		return err
+	}
+	if len(roots) != 0 {
+		return refuse("source has a live workflow")
 	}
 	return nil
 }
 
-// reopenForReassignInStore clears b's assignee and resets an in_progress
-// status back to open in a single update, returning nil without writing when
-// the bead is already open and unassigned so no spurious store write occurs.
-// The status reset is what makes a bead that an order or human previously
-// claimed (status=in_progress) claimable again — IsReadyCandidate requires
-// status=open, so clearing the assignee alone leaves it routed-but-unclaimable
-// (gastownhall/gascity#3231).
-func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) error {
-	var update beads.UpdateOpts
-	if strings.TrimSpace(b.Assignee) != "" {
-		empty := ""
-		update.Assignee = &empty
+type reassignmentRouter struct {
+	pending *preparedReassignment
+	router  BeadRouter
+	cfg     *config.City
+}
+
+func (r reassignmentRouter) Route(ctx context.Context, req RouteRequest) error {
+	req.Store = r.pending.store
+	if router, ok := r.router.(AtomicReassignmentRouter); ok {
+		return router.Reassign(ctx, req, r.pending.before)
 	}
-	if b.Status == "in_progress" {
+	req.Target = agentutil.NormalizePoolRouteTarget(r.cfg, req.Target)
+	return CommitReassignment(req, r.pending.before)
+}
+
+// CommitReassignment publishes a built-in route and releases its source owner
+// in one write pinned to the originally observed revision. It never retries.
+func CommitReassignment(req RouteRequest, before beads.Bead) error {
+	if req.Store == nil || req.BeadID != before.ID || strings.TrimSpace(req.Target) == "" {
+		return fmt.Errorf("invalid atomic reassignment target")
+	}
+	writer, ok := beads.ConditionalWriterForTarget(req.Store)
+	if !ok || before.Revision <= 0 {
+		return fmt.Errorf("source %s does not support revision-fenced reassignment", before.ID)
+	}
+	empty := ""
+	update := beads.UpdateOpts{
+		Assignee: &empty,
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: req.Target},
+	}
+	if before.Status == "in_progress" {
 		open := "open"
 		update.Status = &open
 	}
-	if update.Assignee == nil && update.Status == nil {
-		return nil
-	}
-	return store.Update(beadID, update)
+	return writer.UpdateIfMatch(before.ID, before.Revision, update)
 }

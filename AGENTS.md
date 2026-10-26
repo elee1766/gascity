@@ -17,8 +17,7 @@ expressed — as beads composed into formulas — was powerful enough to abstrac
 roles into configuration. Gas City extracts that insight into an SDK where Gas
 Town becomes one configuration among many.
 
-This file holds only what applies everywhere. Rules for a specific area live
-next to that code; read the matching file before changing it.
+Read the area-specific instructions listed below before changing code.
 
 ## Read first
 
@@ -27,6 +26,7 @@ next to that code; read the matching file before changing it.
 | `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
 | `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
+| `internal/sling/` | `internal/sling/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
 | Session creation or lifecycle from `cmd/gc` or `internal/api` | `internal/worker/AGENTS.md` |

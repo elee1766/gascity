@@ -2124,7 +2124,16 @@ func (c *CachingStore) applyReadyProjection(op string, items []Bead) ([]Bead, er
 // spending a subprocess, so a cleared flag could never be re-derived.
 func (c *CachingStore) readyReadsMustGoLive() bool {
 	if dynamic, ok := c.backing.(interface{ readinessChangesExternally() bool }); ok && dynamic.readinessChangesExternally() {
-		return true
+		for _, deps := range c.deps {
+			for _, dep := range deps {
+				if dep.Type != "blocks" && dep.Type != "waits-for" && dep.Type != "conditional-blocks" {
+					continue
+				}
+				if _, local := c.beads[dep.DependsOnID]; !local {
+					return true
+				}
+			}
+		}
 	}
 	return c.readyProjectionDegraded.Load()
 }

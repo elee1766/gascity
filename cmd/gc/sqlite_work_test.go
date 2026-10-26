@@ -84,7 +84,7 @@ func TestSQLiteWorkCrossScopeDependency(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = blockerStore.CloseStore() })
-	dependent, err := dependentStore.Create(beads.Bead{Title: "frontend waits for backend"})
+	dependent, err := dependentStore.Create(beads.Bead{Title: "frontend waits for backend", Assignee: "worker-one"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +95,17 @@ func TestSQLiteWorkCrossScopeDependency(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := doSQLiteWorkBd(city, cfg, execStoreTarget{ScopeRoot: rig}, []string{"dep", "add", dependent.ID, blocker.ID}, &out, &errOut); code != 0 {
 		t.Fatalf("cross-scope dep add failed: %s", errOut.String())
+	}
+	var reverseOut, reverseErr bytes.Buffer
+	if code := doSQLiteWorkBd(city, cfg, execStoreTarget{ScopeRoot: backend}, []string{"dep", "list", blocker.ID, "--direction=up", "--type=blocks", "--json"}, &reverseOut, &reverseErr); code != 0 {
+		t.Fatalf("reverse dependency lookup: %s", reverseErr.String())
+	}
+	var reverse []bdByIDDepRow
+	if err := json.Unmarshal(reverseOut.Bytes(), &reverse); err != nil {
+		t.Fatal(err)
+	}
+	if len(reverse) != 1 || reverse[0].ID != dependent.ID || reverse[0].Assignee != "worker-one" || reverse[0].Status != "open" || reverse[0].DepType != "blocks" {
+		t.Fatalf("cascade dependency rows = %+v, want the foreign dependent and its owner", reverse)
 	}
 	cache := beads.NewCachingStoreForTest(dependentStore, nil)
 	t.Cleanup(func() { _ = closeBeadStoreHandle(cache) })

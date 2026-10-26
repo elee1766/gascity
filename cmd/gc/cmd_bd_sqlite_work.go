@@ -369,7 +369,13 @@ func runSQLiteWorkBd(cityPath string, cfg *config.City, target execStoreTarget, 
 			if len(positionals) != 2 {
 				return errors.New("dep list requires one ID")
 			}
-			rows, err := store.DepList(id, *direction)
+			filter := ""
+			if flags.Changed("type") {
+				filter = *kind
+			} else if flags.Changed("dep-type") {
+				filter = *depType
+			}
+			rows, err := sqliteWorkDependencyRows(cityPath, target.ScopeRoot, store, id, *direction, filter)
 			if err != nil {
 				return err
 			}

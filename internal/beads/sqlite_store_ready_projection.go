@@ -8,12 +8,9 @@ import (
 )
 
 func (s *SQLiteStore) readinessChangesExternally() bool {
-	if s.dependencyResolver == nil {
-		return false
-	}
-	var external bool
-	err := s.readDB.QueryRow(`SELECT EXISTS (SELECT 1 FROM deps d LEFT JOIN beads b ON b.id=d.depends_on_id WHERE b.id IS NULL AND d.dep_type IN ('blocks','waits-for','conditional-blocks'))`).Scan(&external)
-	return err != nil || external
+	// Scope-local cache events cannot invalidate foreign blocker statuses.
+	// This check runs under the cache lock and must never perform database I/O.
+	return s.dependencyResolver != nil
 }
 
 func beadIDsFromSlice(items []Bead) []string {

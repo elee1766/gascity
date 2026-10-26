@@ -742,7 +742,7 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 
 	defaultRoute := GraphRouteBindingForAgent(*a)
 	for _, named := range cfg.NamedSessions {
-		if named.QualifiedName() != routedTo {
+		if named.QualifiedName() != routedTo || named.TemplateQualifiedName() == routedTo {
 			continue
 		}
 		binding, ok, err := ResolveGraphDirectSessionBinding(store, cityName, cfg, routedTo, GraphRouteRigContext(routedTo), deps)

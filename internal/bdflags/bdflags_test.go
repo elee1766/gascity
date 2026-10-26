@@ -460,7 +460,7 @@ func TestScanUnknownFlagsMarkdownTableCellIsolatesInvocations(t *testing.T) {
 // dispatch. gc-sling works around the gap by writing --if-assignee=VALUE, which
 // the argv scanner skips entirely; this is the fix that workaround points at.
 func TestUpdateCompareAndSetFlagsArePinned(t *testing.T) {
-	for _, flag := range []string{"--if-assignee", "--if-status"} {
+	for _, flag := range []string{"--if-assignee", "--if-status", "--if-revision"} {
 		if !updateValueFlags()[flag] {
 			t.Errorf("update value flags missing %s", flag)
 		}

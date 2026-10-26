@@ -275,8 +275,19 @@ func TestReleasePairRefusesLiveReplacementIdentity(t *testing.T) {
 func TestReleasePairStagedHandoverOnSplitStores(t *testing.T) {
 	c := newReleasePairCity(t, "delivery:demo")
 
-	if out, errOut, code := c.releasePair(); code != 0 || !strings.Contains(out, "result=preflight-verified") {
-		t.Fatalf("dry run: exit %d out=%s err=%s", code, out, errOut)
+	out, errOut, code := c.releasePair("--json")
+	if code != 0 {
+		t.Fatalf("JSON dry run: exit %d out=%s err=%s", code, out, errOut)
+	}
+	var result struct {
+		SchemaVersion string `json:"schema_version"`
+		OK            bool   `json:"ok"`
+		Command       string `json:"command"`
+		Action        string `json:"action"`
+		Result        string `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil || result.Result != "preflight-verified" || result.SchemaVersion != "1" || !result.OK || result.Command != "convoy.release-pair" || result.Action != "release-pair" {
+		t.Fatalf("JSON dry run result: %s (%v)", out, err)
 	}
 	if row := c.show(c.source); row.Assignee != releasePairDeadOwner || row.Status != "blocked" {
 		t.Fatalf("dry run mutated the source: %+v", row)
@@ -308,7 +319,7 @@ func TestReleasePairStagedHandoverOnSplitStores(t *testing.T) {
 	if row := c.show(c.source); !slices.Equal(row.Labels, []string{"delivery:demo"}) || row.Metadata["gc.handover.phase"] != "release-source" {
 		t.Fatalf("source labels or provenance lost: %+v", row)
 	}
-	out, code := c.hookClaim()
+	out, code = c.hookClaim()
 	if code != 0 || !strings.Contains(out, c.step) {
 		t.Fatalf("worker did not claim the original step: exit %d %s", code, out)
 	}

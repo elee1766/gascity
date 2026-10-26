@@ -513,6 +513,15 @@ func releasePairConvoyTracks(store beads.Store, convoyID, sourceID string) error
 // the pair or the retired session, the pair's dependency edges, and open waits.
 // Any read error, partial answer or possible truncation fails closed.
 func (r *releasePairRun) inventory(m *releasePairManifest) (releasePairInventory, error) {
+	current, err := r.sessions.List("", "")
+	if err != nil {
+		return releasePairInventory{}, fmt.Errorf("checking replacement sessions: %w", err)
+	}
+	for _, candidate := range current {
+		if candidate.AgentName == m.From || slices.Contains(sessionpkg.AssigneeIdentities(candidate), m.From) {
+			return releasePairInventory{}, fmt.Errorf("open session %s still owns %q; refusing handover", candidate.ID, m.From)
+		}
+	}
 	needles := append(m.ids(), m.OldSession, m.From)
 	own := map[string]bool{}
 	for _, id := range m.ids() {

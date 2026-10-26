@@ -237,6 +237,40 @@ func TestReleasePairRefusesUnselectedStoreReferences(t *testing.T) {
 	}
 }
 
+func TestReleasePairRefusesLiveReplacementIdentity(t *testing.T) {
+	for _, key := range []string{"alias", "agent_name", "alias_history"} {
+		for _, late := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/late=%t", key, late), func(t *testing.T) {
+				c := newReleasePairCity(t)
+				if late {
+					if _, errOut, code := c.releasePair("--apply", "--stop-after", "fence-source"); code != 0 {
+						t.Fatalf("fence: %s", errOut)
+					}
+				}
+				replacement, err := c.sessionStore().Create(beads.Bead{
+					Title: "replacement owner", Type: "session", Labels: []string{"gc:session"},
+					Metadata: map[string]string{key: releasePairDeadOwner, "session_name": "replacement-owner", "state": "active"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				before := c.show(c.source)
+				args := []string{}
+				if late {
+					args = append(args, "--apply")
+				}
+				out, errOut, code := c.releasePair(args...)
+				if code != 1 || !strings.Contains(errOut, replacement.ID) {
+					t.Fatalf("expected refusal for replacement %s, got exit %d: %s %s", replacement.ID, code, out, errOut)
+				}
+				if after := c.show(c.source); after.Assignee != before.Assignee || after.Status != before.Status {
+					t.Fatalf("source changed after replacement refusal: %+v -> %+v", before, after)
+				}
+			})
+		}
+	}
+}
+
 // The staged source-only release cannot be claimed until the step is released.
 func TestReleasePairStagedHandoverOnSplitStores(t *testing.T) {
 	c := newReleasePairCity(t, "delivery:demo")

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -382,7 +383,12 @@ func runSQLiteWorkBd(cityPath string, cfg *config.City, target execStoreTarget, 
 					*depType = *kind
 				}
 				if _, err := store.Get(positionals[2]); err != nil {
-					return err
+					if !errors.Is(err, beads.ErrNotFound) {
+						return err
+					}
+					if _, err := resolveSQLiteWorkDependency(context.Background(), cityPath, target.ScopeRoot, positionals[2]); err != nil {
+						return err
+					}
 				}
 				return emitter.DepAdd(id, positionals[2], *depType)
 			}

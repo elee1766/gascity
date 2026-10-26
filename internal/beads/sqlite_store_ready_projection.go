@@ -2,9 +2,85 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+func (s *SQLiteStore) readinessChangesExternally() bool {
+	if s.dependencyResolver == nil {
+		return false
+	}
+	var external bool
+	err := s.readDB.QueryRow(`SELECT EXISTS (SELECT 1 FROM deps d LEFT JOIN beads b ON b.id=d.depends_on_id WHERE b.id IS NULL AND d.dep_type IN ('blocks','waits-for','conditional-blocks'))`).Scan(&external)
+	return err != nil || external
+}
+
+func beadIDsFromSlice(items []Bead) []string {
+	ids := make([]string, len(items))
+	for i, item := range items {
+		ids[i] = item.ID
+	}
+	return ids
+}
+
+func (s *SQLiteStore) readExternalBlockers(ctx context.Context, ids []string, blocked map[string]bool) error {
+	if s.dependencyResolver == nil || len(ids) == 0 {
+		return nil
+	}
+	resolved := make(map[string]bool)
+	for start := 0; start < len(ids); start += sqliteReadyProjectionBatch {
+		chunk := ids[start:min(start+sqliteReadyProjectionBatch, len(ids))]
+		args := make([]any, len(chunk))
+		marks := make([]string, len(chunk))
+		for i, id := range chunk {
+			args[i], marks[i] = id, "?"
+		}
+		rows, err := s.readDB.QueryContext(ctx, `SELECT d.issue_id,d.depends_on_id FROM deps d LEFT JOIN beads b ON b.id=d.depends_on_id WHERE b.id IS NULL AND d.dep_type IN ('blocks','waits-for','conditional-blocks') AND d.issue_id IN (`+strings.Join(marks, ",")+`)`, args...)
+		if err != nil {
+			return fmt.Errorf("reading external dependencies: %w", err)
+		}
+		type edge struct{ source, target string }
+		var edges []edge
+		for rows.Next() {
+			var e edge
+			if err := rows.Scan(&e.source, &e.target); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			edges = append(edges, e)
+		}
+		err = rows.Err()
+		closeErr := rows.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		for _, e := range edges {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if isBlocked, ok := resolved[e.target]; ok {
+				if isBlocked {
+					blocked[e.source] = true
+				}
+				continue
+			}
+			b, err := s.dependencyResolver(ctx, e.target)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return fmt.Errorf("resolving dependency %s: %w", e.target, err)
+			}
+			isBlocked := errors.Is(err, ErrNotFound) || !DependencySatisfied(b.Status, ReadinessWorkOutcome(b.Metadata))
+			resolved[e.target] = isBlocked
+			if isBlocked {
+				blocked[e.source] = true
+			}
+		}
+	}
+	return nil
+}
 
 // A CachingStore over SQLiteStore derives readiness itself: fetchDepsForIDs
 // reports complete deps, so the cache serves Ready from its resident rows.
@@ -79,8 +155,12 @@ func (s *SQLiteStore) readBlockedBatch(chunk []string, into map[string]bool) err
 		args[i] = id
 		placeholders[i] = "?"
 	}
+	predicate := sqliteReadyBlockerExists("b.id")
+	if s.dependencyResolver != nil {
+		predicate = sqliteLocalReadyBlockerExists("b.id")
+	}
 	rows, err := s.readDB.QueryContext(context.Background(),
-		`SELECT b.id, `+sqliteReadyBlockerExists("b.id")+` FROM beads b WHERE b.id IN (`+strings.Join(placeholders, ",")+`)`,
+		`SELECT b.id, `+predicate+` FROM beads b WHERE b.id IN (`+strings.Join(placeholders, ",")+`)`,
 		args...)
 	if err != nil {
 		return fmt.Errorf("sqlite ready projection: %w", err)
@@ -97,5 +177,8 @@ func (s *SQLiteStore) readBlockedBatch(chunk []string, into map[string]bool) err
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("sqlite ready projection: %w", err)
 	}
-	return nil
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	return s.readExternalBlockers(context.Background(), chunk, into)
 }

@@ -2123,6 +2123,9 @@ func (c *CachingStore) applyReadyProjection(op string, items []Bead) ([]Bead, er
 // is known not to serve the projection, later primes are told so without
 // spending a subprocess, so a cleared flag could never be re-derived.
 func (c *CachingStore) readyReadsMustGoLive() bool {
+	if dynamic, ok := c.backing.(interface{ readinessChangesExternally() bool }); ok && dynamic.readinessChangesExternally() {
+		return true
+	}
 	return c.readyProjectionDegraded.Load()
 }
 

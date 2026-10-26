@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -30,12 +32,56 @@ func openSQLiteWorkScope(scopeRoot, cityPath string, initialize bool) (*beads.SQ
 	if err != nil {
 		return nil, err
 	}
-	return openSQLiteWorkScopeWithPrefix(scopeRoot, prefix, initialize)
+	return openSQLiteWorkScopeWithPrefix(scopeRoot, prefix, initialize,
+		beads.WithSQLiteDependencyResolver(func(ctx context.Context, id string) (beads.Bead, error) {
+			return resolveSQLiteWorkDependency(ctx, cityPath, scopeRoot, id)
+		}))
+}
+
+func resolveSQLiteWorkDependency(ctx context.Context, cityPath, sourceRoot, id string) (beads.Bead, error) {
+	if err := ctx.Err(); err != nil {
+		return beads.Bead{}, err
+	}
+	cfg, err := loadCityConfigForBdPassthrough(cityPath, io.Discard)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	type scope struct{ root, prefix string }
+	scopes := []scope{{cityPath, config.EffectiveHQPrefix(cfg)}}
+	for _, rig := range cfg.Rigs {
+		scopes = append(scopes, scope{resolveStoreScopeRoot(cityPath, rig.Path), rig.EffectivePrefix()})
+	}
+	var target *scope
+	for i := range scopes {
+		candidate := &scopes[i]
+		if !strings.HasPrefix(id, candidate.prefix+"-") {
+			continue
+		}
+		if target != nil {
+			return beads.Bead{}, fmt.Errorf("ambiguous dependency namespace %q", id)
+		}
+		target = candidate
+	}
+	if target == nil || samePath(target.root, sourceRoot) {
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	if rawBeadsProviderForScope(target.root, cityPath) != sqliteWorkProvider {
+		return beads.Bead{}, fmt.Errorf("dependency %s is not in a sqlite-work scope", id)
+	}
+	store, err := openSQLiteWorkScopeWithPrefix(target.root, target.prefix, false, beads.WithSQLiteStoreReadOnly())
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	defer store.CloseStore() //nolint:errcheck
+	if err := ctx.Err(); err != nil {
+		return beads.Bead{}, err
+	}
+	return store.Get(id)
 }
 
 // openSQLiteWorkScopeWithPrefix also serves rig provisioning, whose validated
 // candidate prefix is available before the topology is committed to disk.
-func openSQLiteWorkScopeWithPrefix(scopeRoot, prefix string, initialize bool) (*beads.SQLiteWorkStore, error) {
+func openSQLiteWorkScopeWithPrefix(scopeRoot, prefix string, initialize bool, extra ...beads.SQLiteStoreOption) (*beads.SQLiteWorkStore, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("sqlite-work: cannot resolve prefix for %s", scopeRoot)
 	}
@@ -73,10 +119,11 @@ func openSQLiteWorkScopeWithPrefix(scopeRoot, prefix string, initialize bool) (*
 			return nil, fmt.Errorf("sqlite-work: existing ledger is missing or inaccessible: %w", err)
 		}
 	}
-	store, err := beads.OpenSQLiteWorkStore(dir,
+	opts := append([]beads.SQLiteStoreOption{
 		beads.WithSQLiteStoreIDPrefix(prefix),
 		beads.WithSQLiteStoreReservedIDPrefixes(prefix),
-		beads.WithSQLiteStoreRetention(0, 0))
+		beads.WithSQLiteStoreRetention(0, 0)}, extra...)
+	store, err := beads.OpenSQLiteWorkStore(dir, opts...)
 	if err != nil {
 		return nil, err
 	}

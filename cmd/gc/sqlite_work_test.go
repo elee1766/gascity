@@ -50,6 +50,119 @@ prefix = "wrk"
 	return city, rig, cfg
 }
 
+func TestSQLiteWorkCrossScopeDependency(t *testing.T) {
+	city, rig, _ := sqliteWorkTestCity(t)
+	backend := filepath.Join(city, "backend")
+	if err := os.MkdirAll(backend, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(city, "city.toml")
+	body, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, []byte(fmt.Sprintf("\n[[rigs]]\nname = \"backend\"\npath = %q\nprefix = \"acc\"\n", backend))...)
+	if err := os.WriteFile(configPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfigForBdPassthrough(city, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range []string{city, rig, backend} {
+		if err := initSQLiteWorkScope(scope, city); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dependentStore, err := openSQLiteWorkScope(rig, city, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dependentStore.CloseStore() })
+	blockerStore, err := openSQLiteWorkScope(backend, city, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = blockerStore.CloseStore() })
+	dependent, err := dependentStore.Create(beads.Bead{Title: "frontend waits for backend"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := blockerStore.Create(beads.Bead{Title: "backend prerequisite"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	if code := doSQLiteWorkBd(city, cfg, execStoreTarget{ScopeRoot: rig}, []string{"dep", "add", dependent.ID, blocker.ID}, &out, &errOut); code != 0 {
+		t.Fatalf("cross-scope dep add failed: %s", errOut.String())
+	}
+	cache := beads.NewCachingStoreForTest(dependentStore, nil)
+	t.Cleanup(func() { _ = closeBeadStoreHandle(cache) })
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	checkReady := func(want bool) {
+		t.Helper()
+		for _, store := range []beads.Store{dependentStore, cache} {
+			rows, err := store.Ready()
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, row := range rows {
+				found = found || row.ID == dependent.ID
+			}
+			if found != want {
+				t.Fatalf("%T ready=%v, want %v", store, found, want)
+			}
+		}
+	}
+	checkReady(false)
+	lowPriority := 4
+	independent, err := dependentStore.Create(beads.Bead{Title: "unblocked independent work", Priority: &lowPriority})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited, err := dependentStore.Ready(beads.ReadyQuery{Limit: 1})
+	if err != nil || len(limited) != 1 || limited[0].ID != independent.ID {
+		t.Fatalf("blocked foreign dependency consumed ready limit: %+v, %v", limited, err)
+	}
+	if err := blockerStore.Close(blocker.ID); err != nil {
+		t.Fatal(err)
+	}
+	checkReady(true)
+	status := "open"
+	if err := blockerStore.Update(blocker.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatal(err)
+	}
+	checkReady(false)
+	if err := blockerStore.Close(blocker.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := blockerStore.Update(blocker.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}}); err != nil {
+		t.Fatal(err)
+	}
+	checkReady(false)
+	if err := blockerStore.Update(blocker.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: "pass"}}); err != nil {
+		t.Fatal(err)
+	}
+	checkReady(true)
+	for _, missing := range []string{"acc-999999", "unknown-1"} {
+		errOut.Reset()
+		if code := doSQLiteWorkBd(city, cfg, execStoreTarget{ScopeRoot: rig}, []string{"dep", "add", dependent.ID, missing}, &out, &errOut); code == 0 {
+			t.Fatalf("accepted missing dependency %s", missing)
+		}
+	}
+	if err := os.Rename(filepath.Join(sqliteWorkDir(backend), "identity.json"), filepath.Join(sqliteWorkDir(backend), "identity.saved")); err != nil {
+		t.Fatal(err)
+	}
+	for _, store := range []beads.Store{dependentStore, cache} {
+		if _, err := store.Ready(); err == nil {
+			t.Fatalf("%T ignored unavailable foreign scope", store)
+		}
+	}
+}
+
 // Hook operations must use the selected scope's configured provider even when
 // no external bd exists. Raw store tests cannot catch this composition failure.
 func TestHookConfiguredWorkProviderLifecycle(t *testing.T) {

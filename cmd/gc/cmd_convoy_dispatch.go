@@ -49,6 +49,7 @@ func convoyDispatchSubcommands(stdout, stderr io.Writer) []*cobra.Command {
 		newConvoyDeleteCmd(stdout, stderr),
 		newConvoyDeleteSourceCmd(stdout, stderr),
 		newConvoyReopenSourceCmd(stdout, stderr),
+		newConvoyReleasePairCmd(stdout, stderr),
 	}
 }
 

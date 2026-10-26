@@ -145,13 +145,27 @@ func (p *effectPass) readSignalWork(row session.Info, it intent) *txWork {
 	return &txWork{Free: !has && err == nil, Err: err}
 }
 
-// provedIdle is legacy's idle probe (shouldBeginIdleDrainInfo) on leaf:
-// WaitForIdle succeeds, and the runtime reports no activity after the pass
-// began.
+// provedIdle requires a current idle observation and no activity since the
+// pass began. TimedOnly runtimes prove no active protocol turn, not interactive
+// sleep eligibility; Full runtimes retain their quiescence probe.
 func provedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow time.Time) bool {
-	wp, ok := leaf.(runtime.IdleWaitProvider)
-	if !ok || wp.WaitForIdle(ctx, name, idleSleepProbeTimeoutFor(leaf, name)) != nil {
-		return false
+	if resolveSleepCapability(leaf, name) == runtime.SessionSleepCapabilityTimedOnly {
+		tp, ok := leaf.(runtime.TurnFenceProvider)
+		if !ok {
+			return false
+		}
+		idle, read := boundedProbe(ctx, func() bool {
+			turn, err := tp.ObserveTurn(ctx, name)
+			return err == nil && !turn.Active()
+		})
+		if !read || !idle {
+			return false
+		}
+	} else {
+		wp, ok := leaf.(runtime.IdleWaitProvider)
+		if !ok || wp.WaitForIdle(ctx, name, idleSleepProbeTimeoutFor(leaf, name)) != nil {
+			return false
+		}
 	}
 	last, ok := boundedProbe(ctx, func() error {
 		at, err := leaf.GetLastActivity(name)

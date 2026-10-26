@@ -361,10 +361,10 @@ func drainSignalGrace(w *World, reason string) time.Duration {
 	return grace
 }
 
-// idleProof gates idle and no-wake drains: non-interactive sessions begin
-// at once, while interactive sessions require Full sleep capability and a
-// fresh idle probe. Only an idle drain can reuse its legacy idle-stop latch.
-// Idle-respawn always proves idle because its eligibility requires Full.
+// idleProof gates idle and no-wake drains. Non-interactive sessions need no
+// idle probe. Interactive sleep requires Full capability; no-wake cleanup
+// also allows TimedOnly runtimes, whose current turn is proved by the effect.
+// Only idle sleep can reuse its legacy idle-stop latch.
 func idleProof(w *World, info session.Info, reason string) (allowed, probe bool) {
 	if reason == idleRespawnDrainReason {
 		return true, true
@@ -379,7 +379,8 @@ func idleProof(w *World, info session.Info, reason string) (allowed, probe bool)
 	if policy.Class == config.SessionSleepNonInteractive {
 		return true, false
 	}
-	return policy.Capability == runtime.SessionSleepCapabilityFull, true
+	return policy.Capability == runtime.SessionSleepCapabilityFull ||
+		(reason == reasonNoWake && policy.Capability == runtime.SessionSleepCapabilityTimedOnly), true
 }
 
 // armDrainBegin is A20's begin: an alive row the allocation sleeps or

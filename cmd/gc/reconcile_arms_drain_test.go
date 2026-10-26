@@ -370,6 +370,7 @@ func TestIdleBeginGates(t *testing.T) {
 			{"no policy", nil, false},
 			{"non-interactive", &resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive}, true},
 			{"interactive, not Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityDisabled}, false},
+			{"interactive, TimedOnly", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityTimedOnly}, reason == ""},
 			{"interactive, Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityFull}, true},
 		} {
 			it, _ := decideDrain(t, nil, idle, func(w *World) {

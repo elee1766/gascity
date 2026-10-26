@@ -19,6 +19,8 @@ import (
 )
 
 const (
+	// BeadsStoreNameSQLiteWorkStore is the diagnostic name for native SQLite work stores.
+	BeadsStoreNameSQLiteWorkStore = "SQLiteWorkStore"
 	// BeadsStoreNameBdStore is the diagnostic store name for bd-backed stores.
 	BeadsStoreNameBdStore = "BdStore"
 	// BeadsStoreNameFileStore is the diagnostic store name for file-backed stores.
@@ -282,6 +284,9 @@ type StoreOpenOptions struct {
 	OpenFileStore    func() (Store, error)
 	OpenExecStore    func() (Store, error)
 	OpenNativeStore  func() (Store, error)
+	// OpenSQLiteWorkStore opens the configured native work scope, including
+	// the composition root's identity and migration guards. Failure is terminal.
+	OpenSQLiteWorkStore func() (Store, error)
 
 	// OpenProxiedStore opens the split store for a proxied-server scope:
 	// reads on a native handle over bd's proxy data port, mutations on the bd
@@ -389,12 +394,12 @@ func ExecStoreDiagnostic() BeadsDiagnostic {
 }
 
 // ProviderConsultsNativeTransport reports whether a store open for provider
-// reaches the beads.native_transport decision. The file store and exec
+// reaches the beads.native_transport decision. SQLite work, file and exec
 // providers outside the bd contract open before it, so neither the city's
 // native_transport value nor GC_BEADS_FORCE_FALLBACK affects them.
 func ProviderConsultsNativeTransport(provider string) bool {
 	provider = strings.TrimSpace(provider)
-	if provider == "file" {
+	if provider == "file" || provider == "sqlite-work" {
 		return false
 	}
 	return !strings.HasPrefix(provider, "exec:") || contract.ProviderUsesBDContract(provider)
@@ -403,6 +408,17 @@ func ProviderConsultsNativeTransport(provider string) bool {
 // OpenStoreAtForCity opens the configured Store for a city or rig scope.
 func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenResult, error) {
 	provider := strings.TrimSpace(opts.Provider)
+	if provider == "sqlite-work" {
+		store, err := callStoreOpen("sqlite work store", opts.OpenSQLiteWorkStore)
+		if err == nil && store == nil {
+			err = fmt.Errorf("opening sqlite work store: opener returned no store")
+		}
+		// SQLite work uses native CAS guards, not the bd conditional-write rollout.
+		return StoreOpenResult{
+			Store:      store,
+			Diagnostic: BeadsDiagnostic{Store: BeadsStoreNameSQLiteWorkStore, NativeStoreEligible: true},
+		}, err
+	}
 	if !ProviderConsultsNativeTransport(provider) {
 		if provider == "file" {
 			store, err := callStoreOpen("file store", opts.OpenFileStore)

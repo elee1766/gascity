@@ -36,16 +36,17 @@ func TestSQLiteWorkOwnershipSurvivesReopen(t *testing.T) {
 	wins := make(chan string, 2)
 	failures := make(chan error, 2)
 	for actor, store := range map[string]*SQLiteWorkStore{"one": first, "two": second} {
+		bound := WithClaimActor(store, actor).(AssignmentClaimer)
 		wg.Add(1)
-		go func(actor string, store *SQLiteWorkStore) {
+		go func(actor string, bound AssignmentClaimer) {
 			defer wg.Done()
-			_, won, err := store.Claim(b.ID, actor)
+			_, won, err := bound.Claim(b.ID)
 			if err != nil {
 				failures <- err
 			} else if won {
 				wins <- actor
 			}
-		}(actor, store)
+		}(actor, bound)
 	}
 	wg.Wait()
 	close(wins)

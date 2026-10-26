@@ -19,7 +19,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
@@ -233,6 +232,9 @@ func continuationPinAssignee(opts hookClaimOptions) string {
 }
 
 type hookClaimOps struct {
+	// OpenStore opens the configured work leg with the query environment and
+	// mutation actor. Operations and deferred bead announcements share it.
+	OpenStore          hookClaimStoreOpener
 	Runner             WorkQueryRunner
 	Claim              hookClaimFunc
 	ListContinuation   hookListContinuationFunc
@@ -622,14 +624,18 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 // callers (and tests) only override the seams they care about. Runner has no
 // default — a missing work-query runner is a caller error handled in doHookClaim.
 func (ops *hookClaimOps) applyDefaults() {
+	if ops.OpenStore == nil {
+		ops.OpenStore = hookOpenConfiguredStore
+	}
+	stores := hookClaimStoreOps{open: ops.OpenStore}
 	if ops.Claim == nil {
-		ops.Claim = hookClaimWithBdStore
+		ops.Claim = stores.claim
 	}
 	if ops.ListContinuation == nil {
-		ops.ListContinuation = hookListContinuationWithBdStore
+		ops.ListContinuation = stores.listContinuation
 	}
 	if ops.AssignContinuation == nil {
-		ops.AssignContinuation = hookAssignContinuationWithBdStore
+		ops.AssignContinuation = stores.assignContinuation
 	}
 	if ops.DrainAck == nil {
 		ops.DrainAck = hookRuntimeDrainAck
@@ -638,10 +644,10 @@ func (ops *hookClaimOps) applyDefaults() {
 		ops.DrainPending = hookSessionDrainPending
 	}
 	if ops.InputDone == nil {
-		ops.InputDone = hookInputDoneWithBdStore
+		ops.InputDone = stores.inputDone
 	}
 	if ops.SkipDoneWorkflow == nil {
-		ops.SkipDoneWorkflow = hookSkipDoneWorkflowWithBdStore
+		ops.SkipDoneWorkflow = stores.skipDoneWorkflow
 	}
 	if ops.EmitClaimRejected == nil {
 		ops.EmitClaimRejected = hookEmitClaimRejected
@@ -656,7 +662,7 @@ func (ops *hookClaimOps) applyDefaults() {
 		ops.ResolveSessionWorkDir = hookResolveSessionWorkDir
 	}
 	if ops.StampWorkMeta == nil {
-		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
+		ops.StampWorkMeta = stores.stampWorkMeta
 	}
 	if ops.StampSessionClaim == nil {
 		ops.StampSessionClaim = hookStampSessionCurrentClaim
@@ -668,16 +674,16 @@ func (ops *hookClaimOps) applyDefaults() {
 		ops.EnqueueContinuationNudge = hookContinuationNudgeEnqueue
 	}
 	if ops.ReadWorkMeta == nil {
-		ops.ReadWorkMeta = hookReadClaimedBeadWithBdStore
+		ops.ReadWorkMeta = stores.readWorkMeta
 	}
 	if ops.ConfirmBlocked == nil {
-		ops.ConfirmBlocked = hookConfirmBeadBlockedWithBdStore
+		ops.ConfirmBlocked = stores.confirmBlocked
 	}
 	if ops.EmitExecutionStepStarted == nil {
-		ops.EmitExecutionStepStarted = hookEmitExecutionStepStarted
+		ops.EmitExecutionStepStarted = stores.emitExecutionStepStarted
 	}
 	if ops.Release == nil {
-		ops.Release = hookClaimReleaseWithBdStore
+		ops.Release = stores.release
 	}
 	if ops.EmitClaimWindowExpired == nil {
 		ops.EmitClaimWindowExpired = hookEmitClaimWindowExpired
@@ -686,13 +692,13 @@ func (ops *hookClaimOps) applyDefaults() {
 		ops.EmitClaimReleased = hookEmitClaimReleased
 	}
 	if ops.ReclaimStale == nil {
-		ops.ReclaimStale = hookClaimReclaimWithBdStore
+		ops.ReclaimStale = stores.reclaimStale
 	}
 	if ops.RestampAdopted == nil {
-		ops.RestampAdopted = hookClaimRestampWithBdStore
+		ops.RestampAdopted = stores.restampAdopted
 	}
 	if ops.WorkflowStore == nil {
-		ops.WorkflowStore = hookWorkflowStoreWithBdStore
+		ops.WorkflowStore = stores.workflowStore
 	}
 	if ops.EmitHookClaimReclaimedStale == nil {
 		ops.EmitHookClaimReclaimedStale = hookEmitClaimReclaimedStale
@@ -1276,6 +1282,7 @@ func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor stri
 		return false
 	}
 	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
+	defer closeHookWorkflowStore(store)
 	stop, err := molecule.WorkflowStopReason(store, candidate)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: workflow stop check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
@@ -2138,6 +2145,7 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 	// once there is a sibling to pin, answers for all of them; a failed read
 	// fails open like the gate itself.
 	var workflowStore beads.Store
+	defer func() { closeHookWorkflowStore(workflowStore) }()
 	var ancestorStop molecule.WorkflowStop
 	ancestorRead := false
 	stoppedSibling := func(sibling beads.Bead) bool {
@@ -2352,33 +2360,8 @@ func skipDoneWorkflow(store beads.Store, rootID string) error {
 
 const hookSkipDoneWorkflowCloseReason = "hook --claim: input convoy work already terminal; nothing to do"
 
-func hookInputDoneWithBdStore(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
-	return workflowInputDone(hookClaimBdStoreContext(ctx, dir, env, ""), candidate, identityCandidates)
-}
-
-func hookSkipDoneWorkflowWithBdStore(ctx context.Context, dir string, env []string, rootID string) error {
-	return skipDoneWorkflow(hookClaimBdStoreContext(ctx, dir, env, ""), rootID)
-}
-
-func hookClaimWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, bool, error) {
-	store := hookClaimBdStoreContext(ctx, dir, env, assignee)
-	return hookClaimThroughStore(beadID, assignee,
-		func() (beads.Bead, bool, error) { return store.Claim(beadID) },
-		store.Get)
-}
-
-// hookClaimReclaimWithBdStore attempts a scoped stale-lease reclaim (ga-7rj87d
-// FR1/FR2) via `bd reclaim --id beadID`, inheriting bd's own default staleness
-// threshold (NFR3) rather than passing --older-than. No assignee: a reclaim only
-// reverts a stale bead to ready, it never assigns -- the caller retries a normal
-// Claim to actually take it.
-func hookClaimReclaimWithBdStore(ctx context.Context, dir string, env []string, beadID string) (bool, string, error) {
-	store := hookClaimBdStoreContext(ctx, dir, env, "")
-	return store.ReclaimStale(beadID)
-}
-
 // hookClaimThroughStore is the post-mutation classification shared by every
-// store a claim can run against: the work-directory bd context here, and the
+// store a claim can run against: the configured work leg and the
 // relocated class binding in claim_class_route.go.
 //
 // It is factored out rather than duplicated because the classification IS the
@@ -2388,10 +2371,8 @@ func hookClaimReclaimWithBdStore(ctx context.Context, dir string, env []string, 
 // of draining. Two copies of that would be two chances to disagree, and the
 // paths that disagree about ownership are this program's recurring bug class.
 //
-// claim and get are the store's own operations: the bd context's Claim takes the
-// assignee implicitly (BEADS_ACTOR in the subprocess env) while the class
-// binding's takes it explicitly, so the caller binds them and this function
-// never has to know which shape it is holding.
+// claim and get are bound to the same store by the caller. Classification
+// does not select a provider or change the operation's actor.
 func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bool, error), get func(string) (beads.Bead, error)) (beads.Bead, bool, error) {
 	claimed, ok, err := claim()
 	if err != nil {
@@ -3037,42 +3018,6 @@ func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
 	return present == 0 || present == len(worktreeOwnershipEvidenceKeys)
 }
 
-func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
-	store := hookClaimBdStore(dir, env, assignee)
-	return store.Update(beadID, beads.UpdateOpts{Metadata: patch})
-}
-
-func hookWorkflowStoreWithBdStore(ctx context.Context, dir string, env []string, _, actor string) beads.Store {
-	return hookClaimBdStoreContext(ctx, dir, env, actor)
-}
-
-func hookReadClaimedBeadWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {
-	return hookClaimBdStore(dir, env, assignee).Get(beadID)
-}
-
-// hookConfirmBeadBlockedWithBdStore is the production ConfirmBlocked seam. It
-// binds its bd children to ctx — the divergence classifier runs after the drain
-// is already written, so its dependency walk must never outlive the deadline that
-// caller set.
-func hookConfirmBeadBlockedWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
-	return beadHasUnmetPlainBlocksDep(hookClaimBdStoreContext(ctx, dir, env, assignee), beadID)
-}
-
-func hookEmitExecutionStepStarted(step beads.Bead, dir string, env []string, assignee string) {
-	emitExecutionStepStarted(openCityRecorder(io.Discard), step, dir, env, assignee)
-}
-
-// emitExecutionStepStarted is hookEmitExecutionStepStarted recording to rec,
-// which it closes.
-func emitExecutionStepStarted(rec events.Recorder, step beads.Bead, dir string, env []string, assignee string) {
-	if closer, ok := rec.(io.Closer); ok {
-		defer closer.Close() //nolint:errcheck // lifecycle events are best-effort
-	}
-	// The hook's bd context owns both the claimed graph step and its workflow
-	// root; EmitLifecycle verifies the root is graph.v2 before recording.
-	_ = executionevent.EmitLifecycle(rec, hookClaimBdStore(dir, env, assignee), events.ExecutionStepStarted, step, eventActor())
-}
-
 // stampHookSessionCurrentClaim records the claimed bead id on the CLAIMING
 // SESSION's own bead (beadmeta.CurrentClaimBeadIDMetadataKey), the reverse
 // direction from stampHookClaimIdentity's work-bead back-reference.
@@ -3670,21 +3615,6 @@ func hookResolveWorkBranch(tree hookClaimWorkTree) string {
 	return branch
 }
 
-// hookClaimReleaseWithBdStore is the unrouted release: compare-and-swap on the
-// assignee through the agent's own work-directory bd context. It is the release
-// dual of hookClaimWithBdStore, and claim_class_route.go wraps it for a split
-// city so the release reaches the ledger the claim actually landed in.
-func hookClaimReleaseWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
-	return hookClaimBdStoreContext(ctx, dir, env, assignee).ReleaseIfCurrent(beadID, assignee)
-}
-
-// hookClaimRestampWithBdStore is the unrouted adoption re-stamp: an assignee
-// compare-and-set through the agent's own work-directory bd context, actored
-// as the new assignee.
-func hookClaimRestampWithBdStore(ctx context.Context, dir string, env []string, beadID, fromAssignee, toAssignee string) (bool, error) {
-	return hookClaimBdStoreContext(ctx, dir, env, toAssignee).TransferIfCurrent(beadID, fromAssignee, toAssignee)
-}
-
 // hookEmitClaimWindowExpired publishes a best-effort
 // execution.claim_window_expired event so the fleet reports its own orphaned
 // claimers rather than leaving the class invisible.
@@ -3923,23 +3853,6 @@ func continuationNudgeEnqueueAt(cityPath, assignee string) {
 	_ = pokeController(cityPath)
 }
 
-func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {
-	store := hookClaimBdStore(dir, env, "")
-	return store.List(beads.ListQuery{
-		Status: "open",
-		Metadata: map[string]string{
-			beadmeta.RootBeadIDMetadataKey:        rootID,
-			beadmeta.ContinuationGroupMetadataKey: group,
-		},
-		TierMode: beads.TierBoth,
-	})
-}
-
-func hookAssignContinuationWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) error {
-	store := hookClaimBdStore(dir, env, assignee)
-	return store.Update(beadID, beads.UpdateOpts{Assignee: &assignee})
-}
-
 func hookRuntimeDrainAck(stderr io.Writer) error {
 	switch cmdRuntimeDrainAck(nil, false, false, io.Discard, stderr) {
 	case 0:
@@ -3975,24 +3888,17 @@ func tolerateDrainAckRefusal(fn hookDrainAckFunc) hookDrainAckFunc {
 	}
 }
 
-func hookClaimBdStore(dir string, env []string, actor string) *beads.BdStore {
-	return hookClaimBdStoreContext(context.Background(), dir, env, actor)
-}
-
-// hookClaimBdStoreContext is hookClaimBdStore with its bd commands bound to ctx,
-// so a best-effort claim-time write cannot outlast the caller's deadline even if
-// the underlying bd update stalls.
+// hookClaimBdStoreContext constructs only the configured opener's bd leaf,
+// with commands bound to the exact query environment, actor and deadline.
 func hookClaimBdStoreContext(ctx context.Context, dir string, env []string, actor string) *beads.BdStore {
 	return beads.NewBdStore(dir, hookClaimCommandRunnerWithEnvContext(ctx, hookClaimEnvMap(env, dir, actor)))
 }
 
 // hookClaimEnvMap projects the query environment into the exact environment the
 // claim mutation runs in. Because hookClaimCommandRunnerWithEnvContext REPLACES
-// the child environment rather than layering onto the parent, whatever this
-// returns is all the child bd sees: a nil env yields no BEADS_DIR, leaving the
-// child to fall back to cwd discovery. Production never takes that path —
-// claimHookWorkWithRunner always supplies the query env or the selected store's
-// env — but a caller passing nil gets cwd discovery, not the ambient selector.
+// the child environment rather than layering onto the parent, the returned
+// map is all bd sees. A supplied query env stays authoritative; nil follows
+// workQueryEnvForDir's inherited-environment policy.
 func hookClaimEnvMap(env []string, dir string, actor string) map[string]string {
 	env = workQueryEnvForDir(env, dir)
 	out := make(map[string]string, len(env)+1)

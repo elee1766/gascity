@@ -14,7 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-func TestHookClaimWithBdStoreReloadsCanonicalBeadAfterPartialMutation(t *testing.T) {
+func TestHookClaimReloadsCanonicalBeadAfterPartialMutation(t *testing.T) {
 	originalRunner := hookClaimCommandRunnerWithEnvContext
 	t.Cleanup(func() { hookClaimCommandRunnerWithEnvContext = originalRunner })
 
@@ -37,12 +37,16 @@ func TestHookClaimWithBdStoreReloadsCanonicalBeadAfterPartialMutation(t *testing
 		}
 	}
 
-	claimed, ok, err := hookClaimWithBdStore(context.Background(), "/rig", nil, "work-1", "worker-1")
+	ops := hookClaimOps{OpenStore: func(ctx context.Context, dir string, env []string, actor string) (beads.Store, error) {
+		return hookClaimBdStoreContext(ctx, dir, env, actor), nil
+	}}
+	ops.applyDefaults()
+	claimed, ok, err := ops.Claim(context.Background(), "/rig", nil, "work-1", "worker-1")
 	if err != nil {
-		t.Fatalf("hookClaimWithBdStore: %v", err)
+		t.Fatalf("hook claim: %v", err)
 	}
 	if !ok {
-		t.Fatal("hookClaimWithBdStore ok = false, want true")
+		t.Fatal("hook claim ok = false, want true")
 	}
 	if claimed.Metadata["gc.root_bead_id"] != "root-1" || claimed.Metadata["gc.continuation_group"] != "review" {
 		t.Fatalf("claimed metadata = %#v, want canonical root and continuation group", claimed.Metadata)

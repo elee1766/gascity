@@ -415,13 +415,19 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
 }
 
-// Claim forwards the two-argument compare-and-swap claim to the wrapped
-// store, the same plain pass-through ReleaseIfCurrent just above uses: the
-// policy layer shapes creation and reads, and has no claim policy of its own
-// to apply, so the inner store's ok/error idiom (a conflict is ok=false with a
-// nil error; a missing bead is ErrNotFound) travels unmodified.
-// beadPolicyGraphStore inherits this via its embedded *beadPolicyStore,
-// matching ConditionalWritesResolveTarget's comment above.
+// AssignmentClaimTarget lets a bound claim handle retain policy-shaped reads
+// while using the underlying adapter's original actor contract.
+func (s *beadPolicyStore) AssignmentClaimTarget() beads.Store { return s.Store }
+
+// CloseStore preserves ownership when a bound handle wraps this policy store.
+func (s *beadPolicyStore) CloseStore() error {
+	if s.borrowed {
+		return nil
+	}
+	return closeBeadStoreHandle(s.Store)
+}
+
+// Claim preserves the explicit-actor capability used by graph-store callers.
 func (s *beadPolicyStore) Claim(id, assignee string) (beads.Bead, bool, error) {
 	claimer, ok := s.Store.(interface {
 		Claim(id, assignee string) (beads.Bead, bool, error)
@@ -430,6 +436,22 @@ func (s *beadPolicyStore) Claim(id, assignee string) (beads.Bead, bool, error) {
 		return beads.Bead{}, false, beads.ErrClaimUnsupported
 	}
 	return claimer.Claim(id, assignee)
+}
+
+func (s *beadPolicyStore) ReclaimStale(id string) (bool, string, error) {
+	reclaimer, ok := s.Store.(beads.StaleAssignmentReclaimer)
+	if !ok {
+		return false, "", beads.ErrReclaimUnsupported
+	}
+	return reclaimer.ReclaimStale(id)
+}
+
+func (s *beadPolicyStore) TransferIfCurrent(id, from, to string) (bool, error) {
+	mover, ok := s.Store.(beads.ConditionalAssigneeTransferer)
+	if !ok {
+		return false, beads.ErrConditionalTransferUnsupported
+	}
+	return mover.TransferIfCurrent(id, from, to)
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {

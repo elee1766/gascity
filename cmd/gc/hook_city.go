@@ -80,6 +80,8 @@ func (h *hookCity) recorder() events.Recorder {
 // seam is left to its default (hookClaimOps.applyDefaults).
 func (h *hookCity) claimOps() hookClaimOps {
 	var ops hookClaimOps
+	ops.OpenStore = h.openClaimStore
+	stores := hookClaimStoreOps{open: ops.OpenStore}
 	ops.DrainPending = func(sessionID string) (bool, error) {
 		return sessionDrainPendingVia(h.sessionFront, sessionID)
 	}
@@ -105,7 +107,7 @@ func (h *hookCity) claimOps() hookClaimOps {
 		emitClaimReclaimedStale(h.recorder(), beadID, previousOwner, newAssignee)
 	}
 	ops.EmitExecutionStepStarted = func(step beads.Bead, dir string, env []string, assignee string) {
-		emitExecutionStepStarted(h.recorder(), step, dir, env, assignee)
+		stores.emitExecutionStepStartedTo(h.recorder(), step, dir, env, assignee)
 	}
 	ops.EnqueueContinuationNudge = func(assignee string) {
 		continuationNudgeEnqueueAt(h.path, assignee)
@@ -125,8 +127,6 @@ func (h *hookCity) claimOps() hookClaimOps {
 	ops.EmitWorkStartedUnrecorded = func(sessionID, template, beadID string, cause error) {
 		emitWorkStartedUnrecordedTo(h.recorder(), sessionID, template, beadID, cause)
 	}
-	if h.cfg != nil && h.cfg.Beads.Provider == sqliteWorkProvider {
-		return h.withSQLiteWorkClaimOps(ops)
-	}
+	ops.applyDefaults()
 	return ops
 }

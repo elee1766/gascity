@@ -41,7 +41,8 @@ type wireMissStorage struct {
 }
 
 func (s *wireMissStorage) IssueClaimer() (issueops.Claimer, error) { return wireMissClaimer{s}, nil }
-func (s *wireMissStorage) IssueReader() (issueops.Reader, error)   { return wireMissReader{s: s}, nil }
+
+func (s *wireMissStorage) IssueReader() (issueops.Reader, error) { return wireMissReader{s: s}, nil }
 
 type wireMissClaimer struct{ s *wireMissStorage }
 
@@ -105,9 +106,9 @@ func TestClassRoutedClaimTakesAnInfraBindingWispOverAWireWorkStore(t *testing.T)
 }
 
 // TestClassRoutedClaimTakesAnInfraBindingWispOverABdSubprocessWorkLeg is the
-// incident on its production path: the hook's own bd seams
-// (hookClaimWithBdStore, hookReadClaimedBeadWithBdStore) over bd's real
-// replies. No sentinel crosses the subprocess boundary, so the claim's miss is
+// incident on its production path: the hook's default operations over a real
+// BdStore interpreting recorded wire replies. No sentinel crosses the
+// subprocess boundary, so the claim's miss is
 // text the not-found predicate does not recognize, and it is the settling read
 // (`bd show`, legProvedAbsent) that proves the work leg holds no such row and
 // lands the claim in the binding. Without that read every seat spawned for the
@@ -149,12 +150,16 @@ func TestClassRoutedClaimTakesAnInfraBindingWispOverABdSubprocessWorkLeg(t *test
 		}
 	}
 	cityDir := t.TempDir()
-	if _, _, err := hookClaimWithBdStore(context.Background(), cityDir, nil, wisp, "bd.dog-1"); err == nil || hookClaimBeadIsElsewhere(err) {
+	base := hookClaimOps{OpenStore: func(ctx context.Context, dir string, env []string, actor string) (beads.Store, error) {
+		return hookClaimBdStoreContext(ctx, dir, env, actor), nil
+	}}
+	base.applyDefaults()
+	if _, _, err := base.Claim(context.Background(), cityDir, nil, wisp, "bd.dog-1"); err == nil || hookClaimBeadIsElsewhere(err) {
 		t.Fatalf("fixture: the subprocess claim answered %v, want an error that names no miss", err)
 	}
 	ran = nil
 
-	ops := classRoutedHookClaimOps(hookClaimOps{Claim: hookClaimWithBdStore, ReadWorkMeta: hookReadClaimedBeadWithBdStore}, newClaimRouteFor(t, class))
+	ops := classRoutedHookClaimOps(base, newClaimRouteFor(t, class))
 	claimed, ok, err := ops.Claim(context.Background(), cityDir, nil, wisp, "bd.dog-1")
 	if err != nil || !ok || strings.TrimSpace(claimed.Assignee) != "bd.dog-1" {
 		t.Fatalf("claim of %s = (%+v ok=%v err=%v), want it claimed through the infra binding the reader served it from", wisp, claimed, ok, err)

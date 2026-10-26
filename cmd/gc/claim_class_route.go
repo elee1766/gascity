@@ -2,11 +2,11 @@ package main
 
 // Claim-time write routing by coordination class.
 //
-// `gc hook --claim` issues every claim-time write through
-// beads.NewBdStore(dir, ...) — a bd subprocess rooted in the agent's WORK
-// directory (hookClaimBdStoreContext). A relocated coordination class is not a
-// bd workspace and cannot be expressed as a hookStore{dir, env} at all, so on a
-// split city those writes run against a ledger that cannot see the bead.
+// `gc hook --claim` opens the configured work provider for each query scope.
+// A relocated coordination class is a separate physical ledger, not the work
+// scope selected by hookStore{dir, env}. On a split city, class routing remains
+// necessary even when the work provider and coordination provider both use
+// SQLite.
 //
 // The read half closed first: the generated work query now reads through the
 // federated `gc ready`, which covers the binding in process (ga-bvdha). That
@@ -552,7 +552,7 @@ func (r *hookClaimClassRoute) observeWorkLegs(stores []hookStore) {
 }
 
 // claim acquires a binding-resident bead through the closed graph contract,
-// applying the same post-mutation classification hookClaimWithBdStore applies to
+// applying the same post-mutation classification hookClaimStoreOps applies to
 // the work store so the two claim paths report a lost race, a stale projection
 // and a canonical-readback failure identically.
 func (r *hookClaimClassRoute) claim(beadID, assignee string) (beads.Bead, bool, error) {
@@ -587,11 +587,8 @@ func (r *hookClaimClassRoute) listContinuation(rootID, group string) ([]beads.Be
 // emitExecutionStepStarted records the durable lifecycle-start fact against the
 // binding that owns the step.
 //
-// It mirrors hookEmitExecutionStepStarted, whose own comment asserts that "the
-// hook's bd context owns both the claimed graph step and its workflow root" —
-// true on a single-store city and false on a split one, where both live in the
-// binding and the work-directory bd context can read neither. Routing it is what
-// makes that sentence true again; EmitLifecycle still performs the authoritative
+// It mirrors the work-scope event path but reads through the class binding
+// that owns the step and root. EmitLifecycle still performs the authoritative
 // graph.v2 root validation before recording anything.
 func (r *hookClaimClassRoute) emitExecutionStepStarted(step beads.Bead) {
 	var rec events.Recorder

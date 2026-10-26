@@ -6,7 +6,7 @@ through `worker.Handle`, not through `session.Manager`.
 
 ## Active migration: worker boundary
 
-Owned blocked work keeps a session's seat occupied. Duplicate named-session retirement must refuse linked or blocked work before stopping the runtime or mutating ownership until a durable coordinated handover is available. Automatic no-wake drains must prove an interactive runtime idle at both begin and signal; exclusion of held work from runnable demand is not an idle proof.
+Owned blocked work keeps a session's seat occupied. Duplicate named-session retirement must refuse linked or blocked work before stopping the runtime or mutating ownership until a durable coordinated handover is available. Automatic no-wake drains must prove an interactive runtime idle at both begin and signal; exclusion of held work from runnable demand is not an idle proof. TimedOnly providers may prove no-wake cleanup safe through a fresh successful idle turn observation plus the activity fence, without becoming eligible for Full-capability interactive idle sleep; unknown or active turns refuse cleanup.
 
 Started `12a0a848` on Apr 17 2026, in progress. New code on affected paths
 must take the canonical route, not the legacy route.

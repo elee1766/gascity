@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -55,5 +57,70 @@ func TestPollerSessionIdleEnoughUsesACPIdleWait(t *testing.T) {
 	}
 	if pollerSessionIdleEnough(target, sp, 20*time.Millisecond, noActivity) {
 		t.Fatal("pollerSessionIdleEnough = true while an ACP prompt is outstanding")
+	}
+}
+
+// TestACPNoWakeDrainRequiresIdleTurn exercises the drain transaction through
+// the real ACP control socket, without promoting ACP's sleep capability.
+func TestACPNoWakeDrainRequiresIdleTurn(t *testing.T) {
+	for _, busy := range []bool{false, true} {
+		for _, signal := range []bool{false, true} {
+			dir, err := os.MkdirTemp("/tmp", "gc-acp-drain-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
+			owner := sessionacp.NewSeamBackedWithDir(dir, sessionacp.Config{HandshakeTimeout: 10 * time.Second})
+			reader := sessionacp.NewSeamBackedWithDir(dir, sessionacp.Config{})
+			var meta []string
+			wantKind := intentDrainBeginFresh
+			if signal {
+				meta = []string{session.DrainIntentReasonKey, reasonNoWake, session.DrainIntentAtKey, time.Now().Add(-time.Minute).Format(time.RFC3339), session.DrainIntentIncarnationKey, "3"}
+				wantKind = intentSignalFresh
+			}
+			p, it, store, _ := admittedBeginOn(t, meta, func(e *selectionEntry) { e.Desired = desireSleep }, func(w *World) {
+				w.Env.SP = reader
+				for id := range w.SleepPolicies {
+					row := w.Census.Rows[rowKeyOf(id)]
+					name := row.Info.SessionName
+					if err := owner.Start(context.Background(), name, runtime.Config{
+						Command: holdingACPAgent, WorkDir: t.TempDir(),
+						Env: map[string]string{"GC_SESSION_ID": id, "GC_INSTANCE_TOKEN": row.Info.InstanceToken},
+					}); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = owner.Stop(name) })
+					w.SleepPolicies[id] = resolveSessionSleepPolicyInfo(row.Info, w.Env.Cfg, reader)
+					w.Now = time.Now()
+					w.Obs = observedOwn(w, id)
+				}
+			})
+			if it.Kind != wantKind {
+				t.Fatalf("busy=%v signal=%v: decision %s (%s), want %s", busy, signal, it.Kind, it.Reason, wantKind)
+			}
+			if busy {
+				name := p.World.Census.Rows[it.Key].Info.SessionName
+				if err := owner.Nudge(name, runtime.TextContent("hold")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := store.Get(it.Key.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+			after, err := store.Get(it.Key.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if busy {
+				if s.Outcome != settledNoop || s.Cause != causeNotIdle || after.Revision != before.Revision {
+					t.Fatalf("busy signal=%v: %+v, revision %v -> %v", signal, s, before.Revision, after.Revision)
+				}
+			} else if s.Outcome != settledLanded {
+				t.Fatalf("idle signal=%v: %+v", signal, s)
+			}
+			assertNoIdleProbeTarget(t, censusRowOf(t, after).Info, p.World.SleepPolicies[it.Key.ID])
+		}
 	}
 }

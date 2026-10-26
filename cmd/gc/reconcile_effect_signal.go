@@ -119,13 +119,18 @@ var signalFreshNeeds = needs{Runtime: true, Legs: legAttach | legPending}
 // signalNeeds are a signal's reads by D2's fresh-legs column (v5.10a B):
 // the fresh kind's, the plain kind's name lock, and L5 where
 // signalReadsWork.
-func signalNeeds(_ *World, it intent) needs {
+func signalNeeds(w *World, it intent) needs {
 	n := needs{NameLock: true}
 	if it.Kind == intentSignalFresh {
 		n = signalFreshNeeds
 	}
 	if signalReadsWork(it) {
 		n.Legs |= legWork
+	}
+	if it.Kind == intentSignalFresh && it.Reason == decideDrainSignal+reasonNoWake && w.Census != nil {
+		if row, ok := w.Census.Rows[it.Key]; ok {
+			_, n.Idle = idleProof(w, row.Info, reasonNoWake)
+		}
 	}
 	return n
 }
@@ -165,6 +170,12 @@ func redecideSignal(v txView, chk respawnRecheck, _ error) txStep {
 	}
 	if fv := fenceDestructive(v.RT, v.Fence, fenceRequest{Row: v.Row, Legs: legAttach | legPending}); !fv.Proceed {
 		return txStep{Refuse: fv.Reason}
+	}
+	if v.It.Reason == decideDrainSignal+reasonNoWake {
+		allowed, probe := idleProof(v.World, v.Row, reasonNoWake)
+		if !allowed || (probe && !v.Fence.Idle) {
+			return txStep{Cause: causeNotIdle}
+		}
 	}
 	return signalWorkStep(v, step)
 }

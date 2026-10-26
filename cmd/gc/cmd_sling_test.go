@@ -2178,7 +2178,7 @@ func TestCmdSlingDistinctNamedTarget(t *testing.T) {
 			if tc.target != "frontend/worker" {
 				namedName = strings.TrimPrefix(tc.target, "frontend/")
 			}
-			contents = append(contents, []byte(fmt.Sprintf("max_active_sessions = 2\n\n[[named_session]]\nname = %q\ntemplate = \"worker\"\nscope = \"rig\"\ndir = \"frontend\"\nmode = \"on_demand\"\n", namedName))...)
+			contents = append(contents, []byte(fmt.Sprintf("provider = \"probe\"\nmax_active_sessions = 2\n\n[[named_session]]\nname = %q\ntemplate = \"worker\"\nscope = \"rig\"\ndir = \"frontend\"\nmode = \"on_demand\"\n\n[[agent]]\nname = \"control-dispatcher\"\ndir = \"frontend\"\nprovider = \"probe\"\n\n[providers.probe]\ncommand = \"/bin/true\"\n", namedName))...)
 			if err := os.WriteFile(configPath, contents, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -2217,6 +2217,52 @@ func TestCmdSlingDistinctNamedTarget(t *testing.T) {
 			}
 			if after.Metadata[beadmeta.RoutedToMetadataKey] != wantRoute {
 				t.Fatalf("route = %q, want %q", after.Metadata[beadmeta.RoutedToMetadataKey], wantRoute)
+			}
+			if tc.wantFailure || tc.target == "frontend/worker" {
+				return
+			}
+			formulaDir := filepath.Join(cityDir, "formulas")
+			if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := "formula = \"named-probe\"\n[requires]\nformula_compiler = \">=2.0.0\"\n[[steps]]\nid = \"execute\"\ntitle = \"Named work\"\n"
+			if err := os.WriteFile(filepath.Join(formulaDir, "named-probe.toml"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			graphWork, err := store.Create(beads.Bead{Title: "named graph regression", Type: "task", Status: "open"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout.Reset()
+			stderr.Reset()
+			if code := cmdSling([]string{tc.target, graphWork.ID}, false, false, false, "", nil, "", true, false, false, "named-probe", false, false, false, "", "", &stdout, &stderr); code != 0 {
+				t.Fatalf("graph route: %d stdout=%s stderr=%s", code, &stdout, &stderr)
+			}
+			cfg, _, err := loadSlingCityConfig(cityDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			graph := resolveGraphStore(cliStorageRoutes(cityDir), store, cfg, cityDir, nil)
+			rows, err := graph.List(beads.ListQuery{AllowScan: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, step := range rows {
+				if step.Metadata[beadmeta.StepIDMetadataKey] != "named-probe.execute" {
+					continue
+				}
+				found = true
+				if step.Assignee == "" || step.Metadata[beadmeta.SessionIDMetadataKey] != step.Assignee || step.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+					t.Fatalf("named graph step is not bound to a concrete session: %+v", step)
+				}
+				owner, err := cliSessionStore(store, cfg, cityDir).Get(step.Assignee)
+				if err != nil || owner.Metadata["configured_named_identity"] != tc.target {
+					t.Fatalf("named graph owner = %+v, err=%v", owner, err)
+				}
+			}
+			if !found {
+				t.Fatal("named graph execution step not found")
 			}
 		})
 	}

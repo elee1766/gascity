@@ -1351,7 +1351,9 @@ session bindings, unbinds the root, then releases the source while the step
 is still fenced and finally releases the step. Every phase is a revision
 compare-and-swap with exact read-back, and every phase first re-checks all
 five records, open structural references and session waits against the
-preflight snapshot, refusing on any drift.
+preflight snapshot, refusing on any drift. Reference inventory includes all
+configured work scopes and class bindings. An unavailable, suspended or
+possibly truncated scope refuses the handover rather than being skipped.
 
 Holds present before the run are kept unless named with --clear-hold.
 Progress is persisted to a manifest so an interrupted run resumes from the

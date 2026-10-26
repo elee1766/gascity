@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -193,9 +194,50 @@ func (c *releasePairCity) hookClaim() (string, int) {
 	return out, code
 }
 
-// The reviewed staged order on real split stores: a source-only release cannot
-// be claimed or retire the root, the final release lets one worker claim the
-// existing step and then its source, and a repeat changes nothing.
+// Inventory includes unselected work scopes before and after fencing.
+func TestReleasePairRefusesUnselectedStoreReferences(t *testing.T) {
+	for _, late := range []bool{false, true} {
+		t.Run(fmt.Sprintf("after_fencing_%t", late), func(t *testing.T) {
+			c := newReleasePairCity(t)
+			cfgPath := filepath.Join(c.dir, "city.toml")
+			cfg, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other := filepath.Join(c.dir, "other")
+			if err := os.MkdirAll(other, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cfg = append(cfg, []byte("\n[[rigs]]\nname = \"other\"\npath = \""+other+"\"\n")...)
+			if err := os.WriteFile(cfgPath, cfg, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c.run("--rig", "other", "bd", "init")
+			if late {
+				if _, errOut, code := c.releasePair("--apply", "--stop-after", "fence-source"); code != 0 {
+					t.Fatalf("fence: %s", errOut)
+				}
+			}
+			ref := c.jsonMap("--rig", "other", "bd", "create", "other owned reference", "--assignee", releasePairDeadOwner, "--json")["id"].(string)
+			before := c.show(c.source)
+			extra := []string{}
+			want := ref
+			if late {
+				extra = append(extra, "--apply")
+				want = "references or waits changed"
+			}
+			out, errOut, code := c.releasePair(extra...)
+			if code != 1 || !strings.Contains(errOut, want) {
+				t.Fatalf("expected refusal for %s, got exit %d: %s %s", ref, code, out, errOut)
+			}
+			if after := c.show(c.source); after.Assignee != before.Assignee || after.Status != before.Status {
+				t.Fatalf("source changed after incomplete inventory: %+v -> %+v", before, after)
+			}
+		})
+	}
+}
+
+// The staged source-only release cannot be claimed until the step is released.
 func TestReleasePairStagedHandoverOnSplitStores(t *testing.T) {
 	c := newReleasePairCity(t, "delivery:demo")
 

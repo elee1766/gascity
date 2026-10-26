@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
@@ -74,6 +75,7 @@ type releasePairPending struct {
 }
 
 type releasePairInventory struct {
+	Scopes     []string          `json:"scopes"`
 	References []releasePairSnap `json:"references"`
 	Deps       []beads.Dep       `json:"deps"`
 	Waits      []string          `json:"waits"`
@@ -125,7 +127,9 @@ session bindings, unbinds the root, then releases the source while the step
 is still fenced and finally releases the step. Every phase is a revision
 compare-and-swap with exact read-back, and every phase first re-checks all
 five records, open structural references and session waits against the
-preflight snapshot, refusing on any drift.
+preflight snapshot, refusing on any drift. Reference inventory includes all
+configured work scopes and class bindings. An unavailable, suspended or
+possibly truncated scope refuses the handover rather than being skipped.
 
 Holds present before the run are kept unless named with --clear-hold.
 Progress is persisted to a manifest so an interrupted run resumes from the
@@ -509,23 +513,45 @@ func releasePairConvoyTracks(store beads.Store, convoyID, sourceID string) error
 // the pair or the retired session, the pair's dependency edges, and open waits.
 // Any read error, partial answer or possible truncation fails closed.
 func (r *releasePairRun) inventory(m *releasePairManifest) (releasePairInventory, error) {
-	needles := append(m.ids(), m.OldSession)
+	needles := append(m.ids(), m.OldSession, m.From)
 	own := map[string]bool{}
 	for _, id := range m.ids() {
 		own[id] = true
 	}
 	var inv releasePairInventory
+	candidates, skipped := convoyCheckStoreCandidates(r.cfg, r.cityPath)
+	if len(skipped) != 0 {
+		return inv, fmt.Errorf("cannot inventory suspended rig stores %v; refusing an incomplete handover", skipped)
+	}
+	views := make([]convoyStoreView, 0, len(candidates)+len(coordclass.Classes()))
+	for _, dir := range candidates {
+		store, err := openStoreAtForCity(dir, r.cityPath)
+		if err != nil {
+			return inv, fmt.Errorf("opening reference scope %s: %w", dir, err)
+		}
+		views = append(views, convoyStoreView{path: dir, store: store})
+	}
+	routes := cliStorageRoutes(r.cityPath)
+	for _, class := range coordclass.Classes() {
+		if store, relocated := routes.storeFor(class); relocated {
+			if store == nil {
+				return inv, fmt.Errorf("reference class %s has no store", class)
+			}
+			views = append(views, convoyStoreView{path: "class:" + class.String(), store: store})
+		}
+	}
 	seenStores := []beads.Store{}
 	seenRefs := map[string]bool{}
-	for _, id := range m.ids() {
-		store := r.stores[id]
+	for _, view := range views {
+		inv.Scopes = append(inv.Scopes, view.path)
+		store := view.store
 		if slices.ContainsFunc(seenStores, func(s beads.Store) bool { return s == store }) {
 			continue
 		}
 		seenStores = append(seenStores, store)
 		rows, err := store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth, Limit: releasePairInventoryLimit + 1})
 		if err != nil {
-			return inv, fmt.Errorf("listing references for %s: %w", id, err)
+			return inv, fmt.Errorf("listing references in %s: %w", view.path, err)
 		}
 		if len(rows) > releasePairInventoryLimit {
 			return inv, fmt.Errorf("reference scan exceeded %d open records; refusing a possibly truncated inventory", releasePairInventoryLimit)
@@ -540,6 +566,7 @@ func (r *releasePairRun) inventory(m *releasePairManifest) (releasePairInventory
 			}
 		}
 	}
+	sort.Strings(inv.Scopes)
 	sort.Slice(inv.References, func(i, j int) bool { return inv.References[i].ID < inv.References[j].ID })
 	for _, id := range []string{m.Source, m.Step} {
 		for _, direction := range []string{"up", "down"} {
@@ -815,6 +842,9 @@ func releasePairDiff(want, got releasePairSnap, withRevision bool) string {
 }
 
 func releasePairInventoryDiff(want, got releasePairInventory) string {
+	if !slices.Equal(want.Scopes, got.Scopes) {
+		return fmt.Sprintf("reference scopes %v -> %v", want.Scopes, got.Scopes)
+	}
 	if len(want.References) != len(got.References) {
 		return fmt.Sprintf("%d open references -> %d", len(want.References), len(got.References))
 	}

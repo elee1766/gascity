@@ -207,7 +207,81 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 			out[row.ID] = ts
 		}
 	}
+	p.routedDemand(out, raw, s, triggers, held)
 	return out
+}
+
+// routedDemand gives each idle seat with nothing outstanding one ready,
+// unclaimed, unheld routed bead for its template that no seat carries as
+// its trigger. The allocator selects a live seat for such demand but binds
+// only start candidates (AM2), so a warm floor seat would otherwise hold no
+// trigger and never be woken. Each bead goes to at most one seat per pass,
+// seats and beads in a stable order; the ladder's persisted entry paces it.
+func (p *ladderPass) routedDemand(out map[string][]ladderTarget, raw []beads.Bead, s *allocSummary, snap idleClaimWorkSnapshot, held map[string]bool) {
+	if s.Partial || len(s.ReadyRouted) == 0 {
+		return
+	}
+	taken := make(map[string]bool)
+	var idle []beads.Bead
+	for _, row := range raw {
+		if !ladderGoverns(row) {
+			continue
+		}
+		if id := strings.TrimSpace(row.Metadata[beadmeta.TriggerBeadIDMetadataKey]); id != "" {
+			taken[id] = true
+		}
+		if len(out[row.ID]) != 0 || isNamedSessionBead(row) || isManualSessionBead(row) ||
+			ladderGate(sessionInfoFromBead(row), row.Metadata, p.now).Held {
+			continue
+		}
+		rt := p.observeRuntime(row)
+		if rt.running == workladder.TriTrue && rt.quiet.State == workladder.Quiescent && !rt.provider.Degraded {
+			idle = append(idle, row)
+		}
+	}
+	slices.SortFunc(idle, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+	for _, row := range idle {
+		template := normalizedSessionTemplate(row, p.cfg)
+		for i, b := range s.ReadyRouted {
+			if taken[b.ID] || held[b.ID] || !p.unclaimedRoutedFor(b, template) {
+				continue
+			}
+			ref := ""
+			if i < len(s.ReadyRoutedRefs) {
+				ref = s.ReadyRoutedRefs[i]
+			}
+			if keys := snap.byID[b.ID]; len(keys) != 1 {
+				continue // the same ID in two stores: not ours to guess
+			}
+			taken[b.ID] = true
+			key := workladder.ClaimKey{Store: claimStoreRef(ref), Bead: b.ID}
+			out[row.ID] = []ladderTarget{{work: workladder.Work{Key: key, Kind: workladder.KindTrigger}, recheck: p.routedRecheck(b.ID, template)}}
+			break
+		}
+	}
+}
+
+// unclaimedRoutedFor accepts unassigned demand or an assignment to this pool,
+// never an actual session owner or a different pool.
+func (p *ladderPass) unclaimedRoutedFor(b beads.Bead, template string) bool {
+	return isUnclaimedTrigger(p.cfg, b) &&
+		agentTemplateIdentitiesEquivalent(p.cfg, routedToOrLegacyWorkflowTarget(b), template) &&
+		(strings.TrimSpace(b.Assignee) == "" || agentTemplateIdentitiesEquivalent(p.cfg, b.Assignee, template))
+}
+
+// routedRecheck re-reads routed demand live before acting, retaining the
+// selected pool and refusing work claimed, rerouted or held since the snapshot.
+func (p *ladderPass) routedRecheck(id, template string) func() backstopResolution {
+	return func() backstopResolution {
+		b, found, err := p.env.WorkLegs.readLive(id)
+		switch {
+		case err != nil:
+			return backstopResolutionHold
+		case !found || !p.unclaimedRoutedFor(b, template) || beadmeta.HasDispatchHold(b.Labels):
+			return backstopResolutionClear
+		}
+		return backstopResolutionOutstanding
+	}
 }
 
 // trigger is row's own trigger bead when the snapshot holds it open and

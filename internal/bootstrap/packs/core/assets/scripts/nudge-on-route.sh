@@ -88,14 +88,15 @@ EVENTS="$(gc events --type bead.updated --since "$LOOKBACK" 2>/dev/null)" || exi
 # Reduce to unique "<bead_id>\t<routed_to>" pairs. Only events that actually
 # carry a non-empty gc.routed_to target are considered.
 #
-# The bead.updated payload is flat — .payload.id and .payload.metadata — not
-# the nested .payload.bead.{id,metadata} an earlier schema exposed. The nested
-# paths match nothing against the current event shape, so every routed bead was
-# silently dropped and no nudge was ever delivered.
+# The API wraps current bead snapshots in payload.bead. Accept flat snapshots
+# too, but do not wake held or completed work from the lookback window.
 PAIRS="$(printf '%s\n' "$EVENTS" \
-    | jq -r 'select(.payload.metadata."gc.routed_to" != null
-                    and .payload.metadata."gc.routed_to" != "")
-             | [.payload.id, .payload.metadata."gc.routed_to"] | @tsv' 2>/dev/null \
+    | jq -r '(.payload.bead // .payload)
+             | select(.status == "open")
+             | select(all((.labels // [])[]; startswith("hold:") | not))
+             | select(.metadata."gc.routed_to" != null
+                      and .metadata."gc.routed_to" != "")
+             | [.id, .metadata."gc.routed_to"] | @tsv' 2>/dev/null \
     | sort -u)" || PAIRS=""
 [ -n "$PAIRS" ] || exit 0
 
@@ -106,6 +107,7 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
+declare -A nudged_targets=()
 while IFS="$(printf '\t')" read -r bead_id routed_to; do
     if [ -z "$bead_id" ] || [ -z "$routed_to" ]; then continue; fi
     key="$bead_id|$routed_to"
@@ -115,7 +117,16 @@ while IFS="$(printf '\t')" read -r bead_id routed_to; do
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         continue
     fi
-    if nudge_routed_target "$routed_to"; then
+    # Events are hints: recheck current state before sending or recording success.
+    current="$(gc beads show "$bead_id" --format=json 2>/dev/null)" || continue
+    if ! printf '%s\n' "$current" | jq -e --arg target "$routed_to" \
+        '.status == "open" and .metadata."gc.routed_to" == $target
+         and all((.labels // [])[]; startswith("hold:") | not)' >/dev/null 2>&1; then
+        continue
+    fi
+    # One successful reminder covers all newly routed beads for this target in this pass.
+    if [ "${nudged_targets[$routed_to]:-}" = 1 ] || nudge_routed_target "$routed_to"; then
+        nudged_targets["$routed_to"]=1
         STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
         NUDGED=$((NUDGED + 1))
     fi

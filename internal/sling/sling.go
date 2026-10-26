@@ -57,7 +57,7 @@ type SlingOpts struct {
 	Nudge         bool
 	Force         bool
 	DryRun        bool
-	// Reassign clears any existing human assignee on the bead before
+	// Reassign releases the existing assignee on the bead after successful
 	// routing so the target pool/agent can claim it. Without this, a
 	// bead claimed by a human (`bd update --claim`) stays invisible
 	// to the pool's claim filter even after sling sets gc.routed_to.
@@ -268,7 +268,7 @@ type RouteOpts struct {
 	Merge    string // "", "direct", "mr", "local"
 	NoConvoy bool
 	Owned    bool
-	// Reassign clears any existing human assignee on the bead before routing,
+	// Reassign releases the existing assignee after successful routing
 	// so a sling can hand a bead claimed via `bd update --claim` to a new
 	// target's pool. Mapped straight to SlingOpts.Reassign; without it neither
 	// RouteBead nor the API sling path can express --reassign. See #1007.
@@ -299,7 +299,7 @@ type FormulaOpts struct {
 	// formula paths honor the wire no_convoy/owned fields.
 	NoConvoy bool
 	Owned    bool
-	// Reassign clears any existing human assignee before routing. Meaningful
+	// Reassign releases the existing assignee after successful routing. Meaningful
 	// on AttachFormula (an existing bead may be claimed, and the attach route
 	// is !IsFormula); a guaranteed no-op on a fresh LaunchFormula, whose
 	// IsFormula route is skipped by shouldReopenForReassign so the formula name

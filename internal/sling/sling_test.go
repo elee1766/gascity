@@ -3022,6 +3022,130 @@ func TestSlingAttachGraphFormulaSecondBareBeadTargetLaunchBlocksAsDuplicate(t *t
 	}
 }
 
+func TestSlingReassignRejectedWorkflowPreservesOwnership(t *testing.T) {
+	for _, split := range []bool{false, true} {
+		t.Run(fmt.Sprintf("split=%v", split), func(t *testing.T) {
+			formulaDir := t.TempDir()
+			writeGraphV2ConvoyFormula(t, formulaDir)
+			cfg := graphV2SlingTestConfig(t, formulaDir)
+			store, err := beads.OpenSQLiteWorkStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("wrk"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := store.CloseStore(); err != nil {
+					t.Error(err)
+				}
+			})
+			deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+			deps.Store = store
+			deps.CityPath = t.TempDir()
+			if split {
+				deps.GraphStore, err = beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("graph"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if closer, ok := deps.GraphStore.(interface{ CloseStore() error }); ok {
+						if err := closer.CloseStore(); err != nil {
+							t.Error(err)
+						}
+					}
+				})
+			}
+			source, err := store.Create(beads.Bead{Title: "owned workflow input", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, err := New(deps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+			first, err := s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner, status := "worker-original", "in_progress"
+			if err := store.Update(source.ID, beads.UpdateOpts{Assignee: &owner, Status: &status}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.Get(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{Reassign: true})
+			var conflict *sourceworkflow.ConflictError
+			if !errors.As(err, &conflict) {
+				t.Fatalf("reassign error = %v, want live workflow conflict", err)
+			}
+			after, err := store.Get(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Assignee != before.Assignee || after.Status != before.Status || after.Revision != before.Revision {
+				t.Fatalf("rejected handoff changed source: before=%+v after=%+v", before, after)
+			}
+			root, err := deps.graphStore().Get(first.WorkflowID)
+			if err != nil || convoycore.IsTerminalStatus(root.Status) {
+				t.Fatalf("original workflow lost: root=%+v err=%v", root, err)
+			}
+		})
+	}
+}
+
+func TestPreparedReassignmentPreservesChangedClaim(t *testing.T) {
+	for _, change := range []string{"owner", "status", "hold"} {
+		t.Run(change, func(t *testing.T) {
+			store, err := beads.OpenSQLiteWorkStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("wrk"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := store.CloseStore(); err != nil {
+					t.Error(err)
+				}
+			})
+			source, err := store.Create(beads.Bead{Title: "claimed input", Type: "task", Assignee: "original", Status: "in_progress"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending, err := prepareReassignment(source.ID, SlingDeps{Store: store})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var update beads.UpdateOpts
+			switch change {
+			case "owner":
+				owner := "replacement"
+				update.Assignee = &owner
+			case "status":
+				status := "closed"
+				update.Status = &status
+			case "hold":
+				update.Labels = []string{"hold:mayor"}
+			}
+			if err := store.Update(source.ID, update); err != nil {
+				t.Fatal(err)
+			}
+			before, err := store.Get(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := pending.commit(); err == nil {
+				t.Fatal("changed claim was released")
+			}
+			after, err := store.Get(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Revision != before.Revision || after.Assignee != before.Assignee || after.Status != before.Status || !slices.Equal(after.Labels, before.Labels) {
+				t.Fatalf("reassignment overwrote a concurrent change: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
 func TestSlingAttachGraphFormulaAllowsDifferentLiveBareBeadRoots(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-a")
@@ -4925,8 +5049,12 @@ func TestReopenForReassign_RigStore(t *testing.T) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
 	}
-	if err := reopenForReassign(bead.ID, deps); err != nil {
-		t.Fatalf("reopenForReassign: %v", err)
+	pending, err := prepareReassignment(bead.ID, deps)
+	if err != nil {
+		t.Fatalf("prepareReassignment: %v", err)
+	}
+	if err := pending.commit(); err != nil {
+		t.Fatalf("commit reassignment: %v", err)
 	}
 	got, err := rigStore.Get(bead.ID)
 	if err != nil {
@@ -4957,7 +5085,7 @@ func TestReopenForReassign_PrimaryStoreReadError(t *testing.T) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
 	}
-	err = reopenForReassign(bead.ID, deps)
+	_, err = prepareReassignment(bead.ID, deps)
 	if err == nil {
 		t.Fatal("reopenForReassign error = nil, want primary read failure")
 	}
@@ -4993,7 +5121,7 @@ func TestReopenForReassign_SourceStoreReadError(t *testing.T) {
 			}, nil
 		},
 	}
-	err := reopenForReassign("gc-123", deps)
+	_, err := prepareReassignment("gc-123", deps)
 	if err == nil {
 		t.Fatal("reopenForReassign error = nil, want source-store read failure")
 	}
@@ -5019,7 +5147,7 @@ func TestReopenForReassign_SourceStoreListError(t *testing.T) {
 			return nil, fmt.Errorf("stores unavailable")
 		},
 	}
-	err := reopenForReassign("gc-456", deps)
+	_, err := prepareReassignment("gc-456", deps)
 	if err == nil {
 		t.Fatal("reopenForReassign error = nil, want source-workflow store listing failure")
 	}
@@ -5050,8 +5178,12 @@ func TestReopenForReassign_NilPrimaryStore(t *testing.T) {
 			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
 		},
 	}
-	if err := reopenForReassign(bead.ID, deps); err != nil {
-		t.Fatalf("reopenForReassign: %v", err)
+	pending, err := prepareReassignment(bead.ID, deps)
+	if err != nil {
+		t.Fatalf("prepareReassignment: %v", err)
+	}
+	if err := pending.commit(); err != nil {
+		t.Fatalf("commit reassignment: %v", err)
 	}
 	got, err := rigStore.Get(bead.ID)
 	if err != nil {

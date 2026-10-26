@@ -60,6 +60,9 @@ next to that code; read the matching file before changing it.
   Conventional Commits, and push to your branch — never to `main`.
 - A fix that changes an invariant or boundary updates the owning `AGENTS.md`
   in the same pull request.
+- Sling reassignment must preserve the original source owner and status when
+  workflow attachment is rejected. Routing metadata is not proof that a
+  source/workflow ownership transfer completed.
 - Maintainers also keep an internal bd ledger; it is optional and never
   required for contributions. See
   `engdocs/contributors/maintainer-environment.md`.

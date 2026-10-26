@@ -715,12 +715,12 @@ func (r *releasePairRun) runPhase(m *releasePairManifest, phase string) error {
 	// Success and unclassified errors both reconcile against the store.
 	if err := r.reconcilePending(m); err != nil {
 		if writeErr != nil {
-			return fmt.Errorf("%w (write error: %v)", err, writeErr)
+			return fmt.Errorf("%w (write error: %w)", err, writeErr)
 		}
 		return err
 	}
 	if !slices.Contains(m.Completed, phase) {
-		return fmt.Errorf("conditional write on %s did not land: %v", id, writeErr)
+		return fmt.Errorf("conditional write on %s did not land: %w", id, writeErr)
 	}
 	return nil
 }
@@ -737,7 +737,7 @@ func (r *releasePairRun) reconcilePending(m *releasePairManifest) error {
 	p := m.Pending
 	b, err := r.stores[p.ID].Get(p.ID)
 	if err != nil {
-		return fmt.Errorf("%w: re-reading %s after %s: %v", errReleasePairUnknown, p.ID, p.Phase, err)
+		return fmt.Errorf("%w: re-reading %s after %s: %w", errReleasePairUnknown, p.ID, p.Phase, err)
 	}
 	current := releasePairSnapOf(b)
 	switch {
@@ -831,21 +831,6 @@ func releasePairInventoryDiff(want, got releasePairInventory) string {
 	}
 	if !slices.Equal(want.Waits, got.Waits) {
 		return fmt.Sprintf("waits %v -> %v", want.Waits, got.Waits)
-	}
-	return ""
-}
-
-func sortedStrings(in []string) []string {
-	out := slices.Clone(in)
-	sort.Strings(out)
-	return out
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
 	}
 	return ""
 }

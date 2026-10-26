@@ -3,12 +3,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // releasePairCity is a born-split city: sqlite-work work ledger plus a
@@ -78,9 +82,19 @@ name = "control-dispatcher"
 		"BEADS_ACTOR=worker", "GC_SESSION_ORIGIN=ephemeral", "BD_BIN="+filepath.Join(dir, "no-bd"),
 	)
 	c.run("bd", "init")
-	c.session = c.create("retired session", "--type", "session", "--label", "gc:session",
-		"--set-metadata", "alias="+releasePairDeadOwner, "--set-metadata", "session_name=pool-retired")
-	c.run("bd", "close", c.session)
+	t.Setenv("GC_CITY", dir)
+	t.Setenv("GC_BEADS", "sqlite-work")
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	sessions := c.sessionStore()
+	session, err := sessions.Create(beads.Bead{Title: "retired session", Type: "session", Labels: []string{"gc:session"},
+		Metadata: map[string]string{"alias": releasePairDeadOwner, "session_name": "pool-retired"}})
+	if err != nil {
+		t.Fatalf("creating session bead: %v", err)
+	}
+	c.session = session.ID
+	if err := sessions.Close(c.session); err != nil {
+		t.Fatalf("closing session bead: %v", err)
+	}
 	c.source = c.create("source work")
 	c.convoy = c.jsonMap("convoy", "create", "pair input", c.source, "--json")["convoy_id"].(string)
 	mapping := c.jsonMap("formula", "cook", "pair", "--json")["id_mapping"].(map[string]any)
@@ -99,6 +113,16 @@ name = "control-dispatcher"
 	return c
 }
 
+// sessionStore is the sessions-class binding, which bd create refuses to mint into.
+func (c *releasePairCity) sessionStore() beads.Store {
+	c.t.Helper()
+	store, relocated := cliStorageRoutes(c.dir).storeFor(coordclass.ClassSessions)
+	if !relocated || store == nil {
+		c.t.Fatal("sessions class is not relocated; the fixture is not a split city")
+	}
+	return store
+}
+
 func (c *releasePairCity) exec(args ...string) (string, string, int) {
 	c.t.Helper()
 	cmd := exec.Command(c.gc, args...)
@@ -107,7 +131,8 @@ func (c *releasePairCity) exec(args ...string) (string, string, int) {
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	code := 0
-	if exit, ok := err.(*exec.ExitError); ok {
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
 		code = exit.ExitCode()
 	} else if err != nil {
 		c.t.Fatalf("gc %v: %v", args, err)
@@ -282,7 +307,9 @@ func TestReleasePairRefusesDrift(t *testing.T) {
 // Preflight refuses a pair whose owner session is still open.
 func TestReleasePairRefusesLiveOwner(t *testing.T) {
 	c := newReleasePairCity(t)
-	c.run("bd", "reopen", c.session)
+	if err := c.sessionStore().Reopen(c.session); err != nil {
+		t.Fatal(err)
+	}
 	_, errOut, code := c.releasePair("--apply")
 	if code != 1 || !strings.Contains(errOut, "is not closed") {
 		t.Fatalf("live owner not refused: exit %d %s", code, errOut)

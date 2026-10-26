@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -368,7 +369,13 @@ func runSQLiteWorkBd(cityPath string, cfg *config.City, target execStoreTarget, 
 			if len(positionals) != 2 {
 				return errors.New("dep list requires one ID")
 			}
-			rows, err := store.DepList(id, *direction)
+			filter := ""
+			if flags.Changed("type") {
+				filter = *kind
+			} else if flags.Changed("dep-type") {
+				filter = *depType
+			}
+			rows, err := sqliteWorkDependencyRows(cityPath, target.ScopeRoot, store, id, *direction, filter)
 			if err != nil {
 				return err
 			}
@@ -382,7 +389,12 @@ func runSQLiteWorkBd(cityPath string, cfg *config.City, target execStoreTarget, 
 					*depType = *kind
 				}
 				if _, err := store.Get(positionals[2]); err != nil {
-					return err
+					if !errors.Is(err, beads.ErrNotFound) {
+						return err
+					}
+					if _, err := resolveSQLiteWorkDependency(context.Background(), cityPath, target.ScopeRoot, positionals[2]); err != nil {
+						return err
+					}
 				}
 				return emitter.DepAdd(id, positionals[2], *depType)
 			}

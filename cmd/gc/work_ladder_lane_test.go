@@ -1519,8 +1519,7 @@ func TestWorkLadderWakesAnIdleSeatForRoutedDemand(t *testing.T) {
 		c.lane.summary = func() *allocSummary {
 			s := c.summary()
 			for _, b := range bs {
-				live, _ := c.work.Get(b.ID)
-				s.ReadyRouted, s.ReadyRoutedRefs = append(s.ReadyRouted, live), append(s.ReadyRoutedRefs, "")
+				s.ReadyRouted, s.ReadyRoutedRefs = append(s.ReadyRouted, b), append(s.ReadyRoutedRefs, "")
 			}
 			return s
 		}
@@ -1564,5 +1563,62 @@ func TestWorkLadderWakesAnIdleSeatForRoutedDemand(t *testing.T) {
 	n.run(time.Hour, 30*time.Second, nil)
 	if len(n.nudgedAt) != 0 || len(n.posted) != 0 {
 		t.Fatalf("ineligible demand: nudges %v, recycles %+v", n.nudgedAt, n.posted)
+	}
+
+	t.Run("pool-template assignment", func(t *testing.T) {
+		c := newLadderCity(t)
+		b := routed(c, "assigned to pool", mine)
+		pool := "worker"
+		if err := c.work.Update(b.ID, beads.UpdateOpts{Assignee: &pool}); err != nil {
+			t.Fatal(err)
+		}
+		b.Assignee = pool
+		offer(c, b)
+		c.run(5*time.Minute, 30*time.Second, nil)
+		if len(c.nudgedAt) == 0 {
+			t.Fatal("pool-template assignment was not woken")
+		}
+	})
+
+	for _, blocked := range []string{"not-running", "busy", "draining", "held"} {
+		t.Run("skip lower seat/"+blocked, func(t *testing.T) {
+			c := newLadderCity(t)
+			first := c.row()
+			meta := maps.Clone(first.Metadata)
+			meta["session_name"] = "seat-b"
+			second, err := c.sessions.Create(beads.Bead{Title: "second seat", Type: "session", Labels: []string{sessionBeadLabel}, Metadata: meta})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.ID >= second.ID {
+				t.Fatal("test requires the unusable seat to sort first")
+			}
+			if err := c.sp.Start(context.Background(), "seat-b", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			c.sp.SetActivity("seat-b", stepsTestNow.Add(-time.Hour))
+			switch blocked {
+			case "not-running":
+				c.setRow(map[string]string{"session_name": "missing-runtime"})
+			case "busy":
+				c.sp.SetActivity(ladderSeatName, c.now)
+			case "draining":
+				c.setRow(map[string]string{"state": "draining"})
+			case "held":
+				c.setRow(map[string]string{session.ContentHoldKey: session.ContentHold{By: "operator", At: c.now}.String()})
+			}
+			offer(c, routed(c, "ready for available seat", mine))
+			c.run(3*time.Minute, 30*time.Second, func() {
+				if blocked == "busy" {
+					c.sp.SetActivity(ladderSeatName, c.now.Add(30*time.Second))
+				}
+			})
+			if got := c.sp.CountCalls("Nudge", "seat-b"); got == 0 {
+				t.Fatal("unusable lower-ID seat consumed routed demand")
+			}
+			if got := c.sp.CountCalls("Nudge", ladderSeatName); got != 0 {
+				t.Fatalf("unusable seat received %d nudges", got)
+			}
+		})
 	}
 }

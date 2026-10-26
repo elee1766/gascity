@@ -35,7 +35,7 @@ import (
 )
 
 // seatWorkStatuses are the statuses a seat's work can hold: what a SeatWork reads.
-var seatWorkStatuses = []string{"open", "in_progress"}
+var seatWorkStatuses = []string{"open", "in_progress", "blocked"}
 
 // SeatWork is one read of every leg of a WorkLegs, keyed by assignee.
 type SeatWork struct {

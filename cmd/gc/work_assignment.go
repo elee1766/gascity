@@ -532,6 +532,48 @@ func (w workAssignment) ReassignWorkBead(item beads.Bead, newSessionID string) e
 	return nil
 }
 
+// errRetiredWorkHeld reports a retirement reassignment refused because the live
+// bead is held or linked and must move with a coordinated handover.
+var errRetiredWorkHeld = errors.New("held or linked work stays with the retired session")
+
+// ReassignRetiredWorkBead is ReassignWorkBead for a session retirement: the
+// held/linked check runs on the live row whose revision fences the write, so
+// work that became held or linked after the caller's guard is never moved.
+// Stores without a revision fence refuse: a status/assignee guard cannot see a
+// hold label or linkage metadata written after the re-read.
+func (w workAssignment) ReassignRetiredWorkBead(item beads.Bead, newSessionID string, held func(beads.Bead) bool) error {
+	store := w.unwrapped()
+	if store == nil {
+		return nil
+	}
+	current, err := beads.HandlesFor(store).Live.Get(item.ID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reassigning %q: re-reading: %w", item.ID, err)
+	}
+	if current.Status != item.Status || strings.TrimSpace(current.Assignee) != strings.TrimSpace(item.Assignee) {
+		return nil
+	}
+	if held(current) {
+		return fmt.Errorf("reassigning %q: %w", item.ID, errRetiredWorkHeld)
+	}
+	opts := beads.UpdateOpts{Assignee: &newSessionID}
+	if writer, ok := beads.ConditionalWriterForTarget(store); ok {
+		err := writer.UpdateIfMatch(item.ID, current.Revision, opts)
+		switch {
+		case err == nil:
+			return nil
+		case beads.IsPreconditionFailed(err):
+			return fmt.Errorf("reassigning %q: the bead changed after the re-read; it stays with the retired session until the next pass", item.ID)
+		case !beads.IsConditionalWriteUnsupported(err):
+			return fmt.Errorf("reassigning %q: %w", item.ID, err)
+		}
+	}
+	return fmt.Errorf("reassigning %q: the store has no revision fence: %w", item.ID, beads.ErrConditionalWriteUnsupported)
+}
+
 // ClearDetachedProbe clears the detached-probe metadata contract on a WORK bead,
 // emitting SetMetadata(id, gc.detached, "") — the empty-string clear semantics
 // the raw clearDetachedProbeMetadata op used. Best-effort: a nil store or empty

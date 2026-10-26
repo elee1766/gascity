@@ -68,7 +68,8 @@ func (c *closeReadCity) leg(kind string) beads.Store {
 
 // A claim assigned after the index read refuses the gate-decided close on the
 // binding, a native rig and the cached work store; with none, the seat closes.
-// Either way the close reads the work store's backing not once.
+// Open claims stay cached; blocked ownership requires two backing reads because
+// PrimeActive covers only open and in_progress (index and close-time check).
 func TestCloseRead_LateClaimRefusesTheClose(t *testing.T) {
 	for _, kind := range []string{"none", "binding", "rig", "work"} {
 		t.Run(kind, func(t *testing.T) {
@@ -88,8 +89,8 @@ func TestCloseRead_LateClaimRefusesTheClose(t *testing.T) {
 			if kind != "none" {
 				assertWork(t, c.leg(kind), claim.ID, "open", c.seat.ID)
 			}
-			if got := c.backing.n() - before; got != 0 {
-				t.Fatalf("the close read the work store's backing %d times, want 0 (cache only)", got)
+			if got := c.backing.n() - before; got != 2 {
+				t.Fatalf("the close read the work store's backing %d times, want 2 blocked-status reads", got)
 			}
 		})
 	}

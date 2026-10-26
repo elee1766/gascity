@@ -135,6 +135,40 @@ func runSignal(t *testing.T, meta []string, entry func(*selectionEntry), kind st
 	return s, got
 }
 
+// A no-wake drain must recheck idle when signaling, after its grace period.
+func TestNoWakeSignalRechecksIdle(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		waitErr  error
+		activity time.Duration
+		wantIdle bool
+	}{
+		{"idle", nil, -time.Hour, true},
+		{"busy", errors.New("turn resumed"), -time.Hour, false},
+		{"activity after pass", nil, time.Second, false},
+	} {
+		p, it, store, leaf := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), func(e *selectionEntry) { e.Desired = desireSleep }, func(w *World) {
+			for id := range w.SleepPolicies {
+				w.SleepPolicies[id] = resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityFull}
+			}
+		})
+		if it.Kind != intentSignalFresh {
+			t.Fatalf("decided %+v, want fresh no-wake signal", it)
+		}
+		leaf.WaitForIdleErrors["s-gc-1"] = tc.waitErr
+		leaf.Activity = map[string]time.Time{"s-gc-1": gatherNow.Add(tc.activity)}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, _ := store.Get(it.Key.ID)
+		if !tc.wantIdle {
+			if s.Outcome != settledNoop || s.Cause != causeNotIdle || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+				t.Fatalf("%s runtime signaled: %+v", tc.name, s)
+			}
+		} else if s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("idle runtime did not signal: %+v", s)
+		}
+	}
+}
+
 // TestSignalFreshAttachDefers (R26, C8.9). Kills an idle or no-wake-reason
 // signal that skips its fresh L3 or L4: attached or pending refuses with its
 // cause and writes nothing; detached with nothing pending signals.

@@ -361,19 +361,18 @@ func drainSignalGrace(w *World, reason string) time.Duration {
 	return grace
 }
 
-// idleProof is SESS-621's gate on an idle begin: a non-interactive session
-// begins at once; an interactive one only with Full sleep capability, and
-// then probe asks its effect to prove the agent idle (WaitForIdle, with no
-// activity since). A row with no resolved policy never begins, as legacy's
-// zero policy. A legacy idle-stop-pending mark is the proof already. An
-// idle-respawn begin, whose eligibility requires Full capability, always
-// proves the agent idle (legacy's shouldBeginIdleDrainInfo has no mark
-// bypass).
+// idleProof gates idle and no-wake drains: non-interactive sessions begin
+// at once, while interactive sessions require Full sleep capability and a
+// fresh idle probe. Only an idle drain can reuse its legacy idle-stop latch.
+// Idle-respawn always proves idle because its eligibility requires Full.
 func idleProof(w *World, info session.Info, reason string) (allowed, probe bool) {
 	if reason == idleRespawnDrainReason {
 		return true, true
 	}
-	if reason != drainIdle || session.DispositionOfInfo(info).IdleStop {
+	if reason != drainIdle && reason != reasonNoWake {
+		return true, false
+	}
+	if reason == drainIdle && session.DispositionOfInfo(info).IdleStop {
 		return true, false
 	}
 	policy := w.SleepPolicies[info.ID]

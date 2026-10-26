@@ -324,7 +324,10 @@ func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 // grace guards only the undesired (orphaned, suspended) begin.
 func TestINC003IsDrainOnly(t *testing.T) {
 	sleep := func(e *selectionEntry) { e.Desired = desireSleep }
-	if it, _ := decideDrain(t, wokeAt(-time.Minute), sleep); it.Kind != intentDrainBeginFresh || it.Reason != decideDrainBegin+reasonNoWake {
+	policy := func(w *World) {
+		w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Class: config.SessionSleepNonInteractive}}
+	}
+	if it, _ := decideDrain(t, wokeAt(-time.Minute), sleep, policy); it.Kind != intentDrainBeginFresh || it.Reason != decideDrainBegin+reasonNoWake {
 		t.Fatalf("Sleep woken 1m ago: %+v, want the no-wake-reason begin", it)
 	}
 }
@@ -357,24 +360,26 @@ func TestEmptyGenerationDrainsAtZero(t *testing.T) {
 // interactive one only with Full sleep capability, and a row with no
 // resolved policy never.
 func TestIdleBeginGates(t *testing.T) {
-	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
-	for _, c := range []struct {
-		name   string
-		policy *resolvedSessionSleepPolicy
-		begins bool
-	}{
-		{"no policy", nil, false},
-		{"non-interactive", &resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive}, true},
-		{"interactive, not Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityDisabled}, false},
-		{"interactive, Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityFull}, true},
-	} {
-		it, _ := decideDrain(t, nil, idle, func(w *World) {
-			if c.policy != nil {
-				w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": *c.policy}
+	for _, reason := range []string{reasonIdleSleep, ""} {
+		idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reason }
+		for _, c := range []struct {
+			name   string
+			policy *resolvedSessionSleepPolicy
+			begins bool
+		}{
+			{"no policy", nil, false},
+			{"non-interactive", &resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive}, true},
+			{"interactive, not Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityDisabled}, false},
+			{"interactive, Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityFull}, true},
+		} {
+			it, _ := decideDrain(t, nil, idle, func(w *World) {
+				if c.policy != nil {
+					w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": *c.policy}
+				}
+			})
+			if begins := it.Kind == intentDrainBeginFresh; begins != c.begins || (!begins && it.Reason != decideIdleUnprovable) {
+				t.Errorf("reason=%q %s: %+v, want begin=%v", reason, c.name, it, c.begins)
 			}
-		})
-		if begins := it.Kind == intentDrainBeginFresh; begins != c.begins || (!begins && it.Reason != decideIdleUnprovable) {
-			t.Errorf("%s: %+v, want begin=%v", c.name, it, c.begins)
 		}
 	}
 }
@@ -450,7 +455,9 @@ func TestDrainBeginsUnderHoldOrQuarantineAsLegacy(t *testing.T) {
 		{"live quarantined row", reasonNoWake, quarantined, func(e *selectionEntry) { e.Desired = desireSleep }},
 		{"orphaned row under a hold", drainOrphaned, []string{"held_until", rowAt(time.Minute), "sleep_reason", "user-hold"}, undesired(drainOrphaned)},
 	} {
-		it, _ := decideDrain(t, c.meta, c.entry)
+		it, _ := decideDrain(t, c.meta, c.entry, func(w *World) {
+			w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Class: config.SessionSleepNonInteractive}}
+		})
 		if it.Reason != decideDrainBegin+c.reason || it.Patch[session.DrainIntentReasonKey] != c.reason {
 			t.Errorf("%s: %+v, want the %s begin", c.name, it, c.reason)
 		}

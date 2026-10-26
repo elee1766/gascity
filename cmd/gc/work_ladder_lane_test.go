@@ -1502,3 +1502,67 @@ func TestWorkLadderPausedRefusalRecordsNothing(t *testing.T) {
 		t.Fatalf("entry %+v, escalations %v: a paused nudge's refusal was recorded", e, escalations(c))
 	}
 }
+
+// An idle floor seat with no trigger of its own is woken for ready routed
+// demand for its template, which the allocator selects the live seat for
+// but never binds (gci-92161), and the ladder stops once the bead is
+// claimed. Held, assigned and other-template demand is never offered.
+func TestWorkLadderWakesAnIdleSeatForRoutedDemand(t *testing.T) {
+	routed := func(c *ladderCity, title string, meta map[string]string, labels ...string) beads.Bead {
+		b, err := c.work.Create(beads.Bead{Title: title, Type: "task", Labels: labels, Metadata: meta})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	offer := func(c *ladderCity, bs ...beads.Bead) {
+		c.lane.summary = func() *allocSummary {
+			s := c.summary()
+			for _, b := range bs {
+				live, _ := c.work.Get(b.ID)
+				s.ReadyRouted, s.ReadyRoutedRefs = append(s.ReadyRouted, live), append(s.ReadyRoutedRefs, "")
+			}
+			return s
+		}
+	}
+	mine := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+
+	c := newLadderCity(t)
+	b := routed(c, "routed while the seat idles", mine)
+	offer(c, b)
+	c.run(5*time.Minute, 30*time.Second, nil)
+	if len(c.nudgedAt) == 0 || c.nudgedAt[0] != workladder.DefaultGrace {
+		t.Fatalf("nudges %v, want the first a grace after the demand appeared", c.nudgedAt)
+	}
+	inProgress := "in_progress"
+	if err := c.work.Update(b.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &c.seat}); err != nil {
+		t.Fatal(err)
+	}
+	nudged := len(c.nudgedAt)
+	c.run(time.Hour, 30*time.Second, nil) // the stale allocation still offers it
+	if len(c.nudgedAt) != nudged || len(c.posted) != 0 {
+		t.Fatalf("after the claim: nudges %v, recycles %+v", c.nudgedAt[nudged:], c.posted)
+	}
+
+	n := newLadderCity(t)
+	other := "worker-2"
+	offer(n,
+		routed(n, "held", mine, beadmeta.HoldExternalLabel),
+		routed(n, "another template's", map[string]string{beadmeta.RoutedToMetadataKey: "other"}),
+		routed(n, "bound to another seat", mine),
+	)
+	held := n.lane.summary().ReadyRouted
+	n.lane.summary = func() *allocSummary {
+		s := n.summary()
+		s.ReadyRouted, s.ReadyRoutedRefs = held, []string{"", "", ""}
+		return s
+	}
+	if err := n.work.Update(held[2].ID, beads.UpdateOpts{Assignee: &other}); err != nil {
+		t.Fatal(err)
+	}
+	held[2].Assignee = other
+	n.run(time.Hour, 30*time.Second, nil)
+	if len(n.nudgedAt) != 0 || len(n.posted) != 0 {
+		t.Fatalf("ineligible demand: nudges %v, recycles %+v", n.nudgedAt, n.posted)
+	}
+}

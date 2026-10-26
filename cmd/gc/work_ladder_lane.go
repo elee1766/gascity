@@ -207,7 +207,70 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 			out[row.ID] = ts
 		}
 	}
+	p.routedDemand(out, raw, s, triggers, held)
 	return out
+}
+
+// routedDemand gives each idle seat with nothing outstanding one ready,
+// unassigned, unheld routed bead for its template that no seat carries as
+// its trigger. The allocator selects a live seat for such demand but binds
+// only start candidates (AM2), so a warm floor seat would otherwise hold no
+// trigger and never be woken. Each bead goes to at most one seat per pass,
+// seats and beads in a stable order; the ladder's persisted entry paces it.
+func (p *ladderPass) routedDemand(out map[string][]ladderTarget, raw []beads.Bead, s *allocSummary, snap idleClaimWorkSnapshot, held map[string]bool) {
+	if s.Partial || len(s.ReadyRouted) == 0 {
+		return
+	}
+	taken := make(map[string]bool)
+	var idle []beads.Bead
+	for _, row := range raw {
+		if !ladderGoverns(row) {
+			continue
+		}
+		if id := strings.TrimSpace(row.Metadata[beadmeta.TriggerBeadIDMetadataKey]); id != "" {
+			taken[id] = true
+		}
+		if len(out[row.ID]) == 0 && !isNamedSessionBead(row) && !isManualSessionBead(row) {
+			idle = append(idle, row)
+		}
+	}
+	slices.SortFunc(idle, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+	for _, row := range idle {
+		template := normalizedSessionTemplate(row, p.cfg)
+		for i, b := range s.ReadyRouted {
+			if taken[b.ID] || held[b.ID] || !isUnclaimedTrigger(p.cfg, b) || strings.TrimSpace(b.Assignee) != "" ||
+				!agentTemplateIdentitiesEquivalent(p.cfg, routedToOrLegacyWorkflowTarget(b), template) {
+				continue
+			}
+			ref := ""
+			if i < len(s.ReadyRoutedRefs) {
+				ref = s.ReadyRoutedRefs[i]
+			}
+			if keys := snap.byID[b.ID]; len(keys) != 1 {
+				continue // the same ID in two stores: not ours to guess
+			}
+			taken[b.ID] = true
+			key := workladder.ClaimKey{Store: claimStoreRef(ref), Bead: b.ID}
+			out[row.ID] = []ladderTarget{{work: workladder.Work{Key: key, Kind: workladder.KindTrigger}, recheck: p.routedRecheck(b.ID)}}
+			break
+		}
+	}
+}
+
+// routedRecheck re-reads routed demand live: still open, unassigned and
+// unheld, or nothing is done about it. Unlike a bound trigger, demand a
+// pool template was assigned to is already another seat's to claim.
+func (p *ladderPass) routedRecheck(id string) func() backstopResolution {
+	return func() backstopResolution {
+		b, found, err := p.env.WorkLegs.readLive(id)
+		switch {
+		case err != nil:
+			return backstopResolutionHold
+		case !found || !isUnclaimedTrigger(p.cfg, b) || strings.TrimSpace(b.Assignee) != "" || beadmeta.HasDispatchHold(b.Labels):
+			return backstopResolutionClear
+		}
+		return backstopResolutionOutstanding
+	}
 }
 
 // trigger is row's own trigger bead when the snapshot holds it open and

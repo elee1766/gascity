@@ -4608,6 +4608,47 @@ func TestDoSlingNudgeSignal(t *testing.T) {
 	}
 }
 
+func TestDoSlingGraphNudgeSignal(t *testing.T) {
+	for _, mode := range []string{"formula", "on-formula", "default-formula"} {
+		for _, state := range []string{"nudge", "no-nudge", "dry-run"} {
+			t.Run(mode+"/"+state, func(t *testing.T) {
+				formulaDir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(formulaDir, "graph-work.formula.toml"), []byte("formula = \"graph-work\"\nversion = 2\ncontract = \"graph.v2\"\n[[steps]]\nid = \"step\"\ntitle = \"Do work\"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				cfg := graphV2SlingTestConfig(t, formulaDir)
+				deps, work, _ := splitSlingDeps(t, cfg)
+				deps.CityPath = t.TempDir()
+				a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+				source, err := work.Create(beads.Bead{Title: "work", Type: "task"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				opts := SlingOpts{Target: a, BeadOrFormula: source.ID, Nudge: state != "no-nudge", DryRun: state == "dry-run"}
+				switch mode {
+				case "formula":
+					opts.IsFormula = true
+					opts.BeadOrFormula = "graph-work"
+				case "on-formula":
+					opts.OnFormula = "graph-work"
+				case "default-formula":
+					opts.Target.DefaultSlingFormula = stringPtr("graph-work")
+				}
+				result, err := DoSling(opts, deps, work)
+				if err != nil {
+					t.Fatalf("DoSling: %v", err)
+				}
+				if !opts.DryRun && result.WorkflowID == "" {
+					t.Fatal("expected graph workflow creation")
+				}
+				if got, want := result.NudgeAgent != nil, state == "nudge"; got != want {
+					t.Fatalf("nudge signal = %v, want %v", got, want)
+				}
+			})
+		}
+	}
+}
+
 func TestDoSlingIdempotentHonorsNudge(t *testing.T) {
 	// A warm pool slot may miss its wake, so re-slinging an already-routed bead
 	// with --nudge must still surface a nudge signal even though the route is

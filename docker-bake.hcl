@@ -43,3 +43,31 @@ target "lint" {
   inherits = ["_common"]
   target   = "lint"
 }
+
+# Dashboard SPA (internal/api/dashboardspa/web) validation.
+#   VITEST_ARGS=src/attention docker --context agent-server buildx bake dashboard
+variable "VITEST_ARGS" { default = "" }
+
+group "dashboard" { targets = ["dashboard-test", "dashboard-typecheck", "dashboard-lint"] }
+
+target "_dashboard" {
+  context    = "."
+  dockerfile = "contrib/bake/dashboard.Dockerfile"
+  output     = ["type=cacheonly"]
+  args       = { VITEST_ARGS = VITEST_ARGS }
+}
+
+target "dashboard-test" {
+  inherits = ["_dashboard"]
+  target   = "test"
+}
+
+target "dashboard-typecheck" {
+  inherits = ["_dashboard"]
+  target   = "typecheck"
+}
+
+target "dashboard-lint" {
+  inherits = ["_dashboard"]
+  target   = "lint"
+}

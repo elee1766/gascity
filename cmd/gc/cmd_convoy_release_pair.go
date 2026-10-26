@@ -101,12 +101,16 @@ type releasePairManifest struct {
 }
 
 type releasePairResult struct {
-	HandoverID string   `json:"handover_id"`
-	Manifest   string   `json:"manifest"`
-	Result     string   `json:"result"`
-	Completed  []string `json:"completed"`
-	Next       string   `json:"next,omitempty"`
-	Detail     string   `json:"detail,omitempty"`
+	SchemaVersion string   `json:"schema_version"`
+	OK            bool     `json:"ok"`
+	Command       string   `json:"command"`
+	Action        string   `json:"action"`
+	HandoverID    string   `json:"handover_id"`
+	Manifest      string   `json:"manifest"`
+	Result        string   `json:"result"`
+	Completed     []string `json:"completed"`
+	Next          string   `json:"next,omitempty"`
+	Detail        string   `json:"detail,omitempty"`
 }
 
 // errReleasePairUnknown marks an interrupted write whose outcome cannot be
@@ -292,7 +296,7 @@ func (r *releasePairRun) execute() (releasePairResult, error) {
 }
 
 func (r *releasePairRun) result(m *releasePairManifest, outcome, detail string) releasePairResult {
-	res := releasePairResult{HandoverID: m.HandoverID, Manifest: r.opts.Manifest, Result: outcome, Completed: slices.Clone(m.Completed), Detail: detail}
+	res := releasePairResult{SchemaVersion: "1", OK: true, Command: "convoy.release-pair", Action: "release-pair", HandoverID: m.HandoverID, Manifest: r.opts.Manifest, Result: outcome, Completed: slices.Clone(m.Completed), Detail: detail}
 	if len(m.Completed) < len(releasePairPhases) {
 		res.Next = releasePairPhases[len(m.Completed)]
 	}

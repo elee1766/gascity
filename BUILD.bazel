@@ -148,6 +148,7 @@ go_library(
         "schemas/convoy/create/result.schema.json",
         "schemas/convoy/land/result.schema.json",
         "schemas/convoy/list/result.schema.json",
+        "schemas/convoy/release-pair/result.schema.json",
         "schemas/convoy/status/result.schema.json",
         "schemas/convoy/stranded/result.schema.json",
         "schemas/convoy/target/result.schema.json",

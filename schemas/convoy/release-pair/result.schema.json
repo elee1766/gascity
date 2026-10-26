@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "ok", "command", "action", "handover_id", "manifest", "result", "completed"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "convoy.release-pair" },
+    "action": { "const": "release-pair" },
+    "handover_id": { "type": "string", "minLength": 1 },
+    "manifest": { "type": "string", "minLength": 1 },
+    "result": { "enum": ["preflight-verified", "pending", "in-progress", "stopped", "released"] },
+    "completed": { "type": "array", "items": { "type": "string" } },
+    "next": { "type": "string" },
+    "detail": { "type": "string" }
+  },
+  "additionalProperties": true
+}

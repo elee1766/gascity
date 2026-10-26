@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"testing"
 	"time"
@@ -141,4 +142,73 @@ func mustGet(t *testing.T, store beads.Store, id string) beads.Bead {
 		t.Fatalf("Get(%s): %v", id, err)
 	}
 	return b
+}
+
+type stopHookProvider struct {
+	*runtime.Fake
+	onStop func()
+}
+
+func (p *stopHookProvider) Stop(name string) error {
+	if p.onStop != nil {
+		p.onStop()
+		p.onStop = nil
+	}
+	return p.Fake.Stop(name)
+}
+
+// Work that becomes held while the old runtime is being stopped must not be
+// split from its session by the retirement that follows the stop.
+func TestRetirementRefusesWorkHeldDuringRuntimeStop(t *testing.T) {
+	for _, mode := range []string{"beads", "rows"} {
+		t.Run(mode, func(t *testing.T) {
+			cityPath := t.TempDir()
+			store := stampedSQLite(t, gate.Require)
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}, NamedSessions: []config.NamedSession{{Template: "worker"}}}
+			cityName := config.EffectiveCityName(cfg, "")
+			spec, ok := session.FindNamedSessionSpec(cfg, cityName, "worker")
+			if !ok {
+				t.Fatal("missing named worker")
+			}
+			makeSession := func(generation, name string) beads.Bead {
+				b, err := store.Create(beads.Bead{Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession}, Metadata: map[string]string{
+					"template": "worker", "configured_named_session": "true", "configured_named_identity": "worker", "generation": generation, "session_name": name,
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return b
+			}
+			winner := makeSession("5", spec.SessionName)
+			loser := makeSession("3", spec.SessionName+"-old")
+			work := createWork(t, store, "in_progress", loser.ID, nil)
+			sp := &stopHookProvider{Fake: runtime.NewFake()}
+			if err := sp.Start(context.Background(), spec.SessionName+"-old", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp.onStop = func() {
+				if err := store.Update(work.ID, beads.UpdateOpts{Labels: []string{"hold:mayor"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sw := testSeatWork("", cfg, store, nil)
+			now := time.Now()
+			switch mode {
+			case "beads":
+				retireDuplicateConfiguredNamedSessionBeads(cityPath, store, sw, sp, cfg, cityName, []beads.Bead{winner, loser}, map[string]beads.Bead{}, map[string]int{}, now, io.Discard)
+			case "rows":
+				rows := []session.ReconcileSession{{Info: sessiontest.SeedBead(t, winner)}, {Info: sessiontest.SeedBead(t, loser)}}
+				retireDuplicateConfiguredNamedSessionRows(cityPath, store, sw, sp, cfg, cityName, rows, now, io.Discard)
+			}
+			if sp.onStop != nil {
+				t.Fatal("retirement did not stop the old runtime")
+			}
+			if got := mustGet(t, store, work.ID); got.Assignee != loser.ID {
+				t.Fatalf("held work assignee = %q, want %q", got.Assignee, loser.ID)
+			}
+			if got := mustGet(t, store, loser.ID); got.Metadata["retired_named_identity"] != "" {
+				t.Fatal("retired the old session while it owns held work")
+			}
+		})
+	}
 }

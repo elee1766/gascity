@@ -752,6 +752,11 @@ func retireDuplicateConfiguredNamedSessionBeads(
 				!stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, cfg, b, "duplicate named session", stderr) {
 				continue
 			}
+			// The stop can block; re-read before the retirement write. Work that
+			// turns held after this read is fenced per row by ReassignRetiredWorkBead.
+			if !duplicateRetirementWorkSafe(sw, sessionAssignmentIdentifiers(b), b.ID, stderr) {
+				continue
+			}
 			batch := session.CellInto(b.ID, b.Metadata, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "duplicate-repair", identity))
 			if setMetaBatch(sessionFrontDoor(store), b.ID, batch, stderr) != nil {
 				continue
@@ -850,6 +855,11 @@ func retireDuplicateConfiguredNamedSessionRows(
 				!stopRuntimeBeforeSessionBeadMutationInfo(cityPath, store, sp, cfg, info, "duplicate named session", stderr) {
 				continue
 			}
+			// The stop can block; re-read before the retirement write. Work that
+			// turns held after this read is fenced per row by ReassignRetiredWorkBead.
+			if !duplicateRetirementWorkSafe(sw, sessionAssignmentIdentifiersInfo(info), info.ID, stderr) {
+				continue
+			}
 			batch := session.CellIntoInfo(info, session.ActorController, session.DispEvent{Kind: session.EvRetire}, now, session.RetireNamedSessionPatch(now, "duplicate-repair", identity))
 			if setMetaBatch(sessionFrontDoor(store), info.ID, batch, stderr) != nil {
 				continue
@@ -875,12 +885,7 @@ func duplicateRetirementWorkSafe(sw *SeatWork, identifiers []string, id string, 
 	held, err := sw.fresh(scope).has(seatWorkQuery{
 		scope: scope, statuses: seatWorkStatuses,
 		keep: func(_ beads.Store, b beads.Bead) (bool, error) {
-			for _, label := range b.Labels {
-				if strings.HasPrefix(label, "hold:") {
-					return true, nil
-				}
-			}
-			return b.Status == "blocked" || b.Metadata["gc.root_bead_id"] != "" || b.Metadata["gc.execution_routed_to"] != "", nil
+			return retirementWorkHeld(b), nil
 		},
 	})
 	if err != nil || held {
@@ -888,6 +893,16 @@ func duplicateRetirementWorkSafe(sw *SeatWork, identifiers []string, id string, 
 		return false
 	}
 	return true
+}
+
+// retirementWorkHeld reports work that retirement must not move on its own.
+func retirementWorkHeld(b beads.Bead) bool {
+	for _, label := range b.Labels {
+		if strings.HasPrefix(label, "hold:") {
+			return true
+		}
+	}
+	return b.Status == "blocked" || b.Metadata["gc.root_bead_id"] != "" || b.Metadata["gc.execution_routed_to"] != ""
 }
 
 func namedSessionBeadWinsCanonicalRepair(candidate, incumbent beads.Bead, canonicalSessionName string) bool {
@@ -1484,7 +1499,7 @@ func reassignWorkAssignedToRetiredSessionBead(
 						continue
 					}
 					seen[key] = struct{}{}
-					if err := wa.ReassignWorkBead(item, newSessionID); err != nil {
+					if err := wa.ReassignRetiredWorkBead(item, newSessionID, retirementWorkHeld); err != nil {
 						fmt.Fprintf(stderr, "session beads: reassigning work %s from retired session %s to %s: %v\n", item.ID, retiredSession.ID, newSessionID, err) //nolint:errcheck
 					}
 				}
@@ -1536,7 +1551,7 @@ func reassignWorkAssignedToRetiredSessionInfo(
 						continue
 					}
 					seen[key] = struct{}{}
-					if err := wa.ReassignWorkBead(item, newSessionID); err != nil {
+					if err := wa.ReassignRetiredWorkBead(item, newSessionID, retirementWorkHeld); err != nil {
 						fmt.Fprintf(stderr, "session beads: reassigning work %s from retired session %s to %s: %v\n", item.ID, retiredSession.ID, newSessionID, err) //nolint:errcheck
 					}
 				}

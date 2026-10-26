@@ -433,7 +433,10 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	// rig-scoped implicit agents (e.g., "hello-world/claude").
 	resolveRigPaths(cityPath, cfg.Rigs)
 
-	a, ok := resolveAgentIdentity(cfg, target, currentRigContext(cfg))
+	a, ok, resolveErr := resolveSlingAgentIdentity(cfg, cityName, target, currentRigContext(cfg))
+	if resolveErr != nil {
+		return fail("target_resolve_failed", fmt.Sprintf("gc sling: %v", resolveErr))
+	}
 	if !ok {
 		if jsonOutput {
 			return writeJSONError(stdout, stderr, "target_resolve_failed", agentNotFoundMsg("gc sling", target, cfg), 1)
@@ -717,12 +720,44 @@ func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg 
 	return id, true, nil
 }
 
+// resolveSlingAgentIdentity preserves template policy while addressing a named session.
+func resolveSlingAgentIdentity(cfg *config.City, cityName, target, rigContext string) (config.Agent, bool, error) {
+	a, agentFound := resolveAgentIdentity(cfg, target, rigContext)
+	spec, named, err := resolveNamedSessionSpecForConfigTarget(cfg, cityName, target, rigContext)
+	if err != nil {
+		if agentFound {
+			return a, true, nil
+		}
+		return config.Agent{}, false, err
+	}
+	if named && (target == spec.Identity || target == spec.SessionName || target == spec.Named.IdentityName()) {
+		return slingNamedAgent(spec), true, nil
+	}
+	if agentFound {
+		return a, true, nil
+	}
+	if !named {
+		return config.Agent{}, false, nil
+	}
+	return slingNamedAgent(spec), true, nil
+}
+
+func slingNamedAgent(spec namedSessionSpec) config.Agent {
+	a := *spec.Agent
+	a.Name = spec.Named.IdentityName()
+	a.Dir = spec.Named.Dir
+	a.BindingName = ""
+	a.PoolName = ""
+	return a
+}
+
 // cliAgentResolver implements sling.AgentResolver using the CLI's
-// 3-step resolution with ambient rig context.
+// agent and named-session resolution with ambient rig context.
 type cliAgentResolver struct{}
 
 func (cliAgentResolver) ResolveAgent(cfg *config.City, name, rigContext string) (config.Agent, bool) {
-	return resolveAgentIdentity(cfg, name, rigContext)
+	a, ok, err := resolveSlingAgentIdentity(cfg, "", name, rigContext)
+	return a, ok && err == nil
 }
 
 // cliBranchResolver implements sling.BranchResolver using git.
@@ -752,7 +787,9 @@ func (r cliBeadRouter) Reassign(_ context.Context, req sling.RouteRequest, befor
 		return fmt.Errorf("sling router: missing dependencies")
 	}
 	if r.deps.Cfg != nil {
-		if agentCfg, ok := findAgentByQualified(r.deps.Cfg, req.Target); ok && isCustomSlingQuery(agentCfg) {
+		if agentCfg, ok, err := resolveSlingAgentIdentity(r.deps.Cfg, r.deps.CityName, req.Target, ""); err != nil {
+			return err
+		} else if ok && isCustomSlingQuery(agentCfg) {
 			return fmt.Errorf("custom sling_query does not support atomic reassignment")
 		}
 		req.Target = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)
@@ -765,7 +802,9 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 		return fmt.Errorf("sling router: missing dependencies")
 	}
 	if r.deps.Cfg != nil {
-		if agentCfg, ok := findAgentByQualified(r.deps.Cfg, req.Target); ok && isCustomSlingQuery(agentCfg) {
+		if agentCfg, ok, err := resolveSlingAgentIdentity(r.deps.Cfg, r.deps.CityName, req.Target, ""); err != nil {
+			return err
+		} else if ok && isCustomSlingQuery(agentCfg) {
 			if r.deps.Runner == nil {
 				return fmt.Errorf("custom sling_query requires a runner")
 			}
@@ -1554,6 +1593,15 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 
 	if a.Suspended {
 		fmt.Fprintf(stderr, "warning: cannot nudge %q: agent is suspended — bead routed but not nudged\n", a.QualifiedName()) //nolint:errcheck // best-effort
+		return
+	}
+
+	// A configured named target is a specific session even when its template is a pool.
+	if spec, ok, err := resolveNamedSessionSpecForConfigTarget(cfg, cityName, a.QualifiedName(), ""); err == nil && ok && spec.Identity == a.QualifiedName() {
+		sessStore := cliSessionStore(store, cfg, cityPath)
+		sn := lookupSessionNameOrLegacy(sessStore, cityName, spec.Identity, st)
+		target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, sessStore, sn)
+		deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
 		return
 	}
 

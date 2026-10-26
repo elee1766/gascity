@@ -2154,6 +2154,74 @@ func TestCmdSlingDryRunRefusesMissingBead(t *testing.T) {
 	}
 }
 
+func TestCmdSlingDistinctNamedTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name, target, query string
+		wantFailure         bool
+	}{
+		{name: "named", target: "frontend/seat"},
+		{name: "numeric named identity", target: "frontend/worker-2"},
+		{name: "template remains routable", target: "frontend/worker"},
+		{name: "named preserves custom policy", target: "frontend/seat", query: "exit 42", wantFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := setupCmdSlingBeadExistsFixture(t)
+			configPath := filepath.Join(cityDir, "city.toml")
+			contents, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.query != "" {
+				contents = append(contents, []byte(fmt.Sprintf("sling_query = %q\n", tc.query))...)
+			}
+			namedName := "seat"
+			if tc.target != "frontend/worker" {
+				namedName = strings.TrimPrefix(tc.target, "frontend/")
+			}
+			contents = append(contents, []byte(fmt.Sprintf("max_active_sessions = 2\n\n[[named_session]]\nname = %q\ntemplate = \"worker\"\nscope = \"rig\"\ndir = \"frontend\"\nmode = \"on_demand\"\n", namedName))...)
+			if err := os.WriteFile(configPath, contents, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			store, err := openAuthoritativeStoreAtForCity(filepath.Join(cityDir, "frontend"), cityDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			work, err := store.Create(beads.Bead{Title: "named route regression", Type: "task", Status: "open"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			invoke := func(dry bool) int {
+				stdout.Reset()
+				stderr.Reset()
+				return cmdSling([]string{tc.target, work.ID}, false, false, false, "", nil, "", true, false, false, "", true, false, dry, "", "", &stdout, &stderr)
+			}
+			if code := invoke(true); code != 0 {
+				t.Fatalf("dry run: %d stdout=%s stderr=%s", code, &stdout, &stderr)
+			}
+			before, err := store.Get(work.ID)
+			if err != nil || before.Metadata[beadmeta.RoutedToMetadataKey] != "" || before.Assignee != "" {
+				t.Fatalf("dry run mutated source: %+v err=%v", before, err)
+			}
+			code := invoke(false)
+			if (code != 0) != tc.wantFailure {
+				t.Fatalf("route: %d stdout=%s stderr=%s", code, &stdout, &stderr)
+			}
+			after, err := store.Get(work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantRoute := tc.target
+			if tc.wantFailure {
+				wantRoute = ""
+			}
+			if after.Metadata[beadmeta.RoutedToMetadataKey] != wantRoute {
+				t.Fatalf("route = %q, want %q", after.Metadata[beadmeta.RoutedToMetadataKey], wantRoute)
+			}
+		})
+	}
+}
+
 func TestCmdSlingDryRunPreviewsInlineText(t *testing.T) {
 	cityDir := setupCmdSlingBeadExistsFixture(t)
 

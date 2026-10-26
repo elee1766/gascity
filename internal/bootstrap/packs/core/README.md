@@ -51,10 +51,17 @@ has no members (a single-session agent or an explicit slot). Without this,
 nudges to a pool base silently no-op — defeating the warm-idle pool wake this
 order exists to provide.
 
-**Idempotence.** A `(bead, routed_to)` pair is nudged at most once. The
-reconciler re-emits `bead.updated` for an actively-routed bead, so the dedup
+**Idempotence.** A `(bead, routed_to)` pair is covered at most once. Each pass
+sends at most one successful reminder per routed target, then records every
+eligible pair covered by that reminder. Failed sends remain eligible for retry.
+The reconciler re-emits `bead.updated` for an actively-routed bead, so the dedup
 state's last-seen timestamp is refreshed on every sighting and the pair is
 never pruned-then-renudged while the routing is live.
+
+**Eligibility.** Events may wrap the snapshot in `payload.bead` or provide a
+flat `payload`. Only open, unheld routed work is eligible. Before sending or
+recording a new pair, the order re-reads the bead and checks its current status,
+hold labels and route, so an old event cannot wake completed or held work.
 
 **Dedup state.** `$GC_PACK_STATE_DIR/nudge-on-route-state.json` — a JSON object
 mapping `"<bead>|<routed_to>"` to an ISO timestamp. `GC_PACK_STATE_DIR`

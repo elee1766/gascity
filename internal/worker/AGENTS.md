@@ -6,6 +6,8 @@ through `worker.Handle`, not through `session.Manager`.
 
 ## Active migration: worker boundary
 
+Owned blocked work keeps a session's seat occupied. Duplicate named-session retirement must refuse linked or blocked work before stopping the runtime or mutating ownership until a durable coordinated handover is available.
+
 Started `12a0a848` on Apr 17 2026, in progress. New code on affected paths
 must take the canonical route, not the legacy route.
 

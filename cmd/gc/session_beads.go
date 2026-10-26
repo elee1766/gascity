@@ -744,6 +744,9 @@ func retireDuplicateConfiguredNamedSessionBeads(
 				continue
 			}
 			b := openBeads[idx]
+			if !duplicateRetirementWorkSafe(sw, sessionAssignmentIdentifiers(b), b.ID, stderr) {
+				continue
+			}
 			oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
 				!stopRuntimeBeforeSessionBeadMutation(cityPath, store, sp, cfg, b, "duplicate named session", stderr) {
@@ -839,6 +842,9 @@ func retireDuplicateConfiguredNamedSessionRows(
 				continue
 			}
 			info := rows[idx].Info
+			if !duplicateRetirementWorkSafe(sw, sessionAssignmentIdentifiersInfo(info), info.ID, stderr) {
+				continue
+			}
 			oldSessionName := strings.TrimSpace(info.SessionNameMetadata)
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
 				!stopRuntimeBeforeSessionBeadMutationInfo(cityPath, store, sp, cfg, info, "duplicate named session", stderr) {
@@ -858,6 +864,30 @@ func retireDuplicateConfiguredNamedSessionRows(
 		}
 	}
 	return rows
+}
+
+// Linked or held work needs a durable handover, not independent per-store writes.
+func duplicateRetirementWorkSafe(sw *SeatWork, identifiers []string, id string, stderr io.Writer) bool {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	scope := RefuseScope{ids: identifiers}
+	held, err := sw.fresh(scope).has(seatWorkQuery{
+		scope: scope, statuses: seatWorkStatuses,
+		keep: func(_ beads.Store, b beads.Bead) (bool, error) {
+			for _, label := range b.Labels {
+				if strings.HasPrefix(label, "hold:") {
+					return true, nil
+				}
+			}
+			return b.Status == "blocked" || b.Metadata["gc.root_bead_id"] != "" || b.Metadata["gc.execution_routed_to"] != "", nil
+		},
+	})
+	if err != nil || held {
+		fmt.Fprintf(stderr, "session beads: refusing duplicate retirement of %s: linked or blocked work requires coordinated handover (read error: %v)\n", id, err) //nolint:errcheck
+		return false
+	}
+	return true
 }
 
 func namedSessionBeadWinsCanonicalRepair(candidate, incumbent beads.Bead, canonicalSessionName string) bool {

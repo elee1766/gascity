@@ -292,6 +292,76 @@ func TestSQLiteWorkCLIAndHookRoundTrip(t *testing.T) {
 	}
 }
 
+func TestNativeBdRevisionGuard(t *testing.T) {
+	for _, scope := range []string{"work", "graph"} {
+		t.Run(scope, func(t *testing.T) {
+			var store beads.Store
+			var ticket beads.Bead
+			var prefix []string
+			if scope == "graph" {
+				_, ticket, store = unsetMetadataSplitCity(t, nil)
+			} else {
+				city, rig, _ := sqliteWorkTestCity(t)
+				if err := initSQLiteWorkScope(rig, city); err != nil {
+					t.Fatal(err)
+				}
+				work, err := openSQLiteWorkScope(rig, city, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = work.CloseStore() })
+				store = work
+				ticket, err = store.Create(beads.Bead{Title: "recover ownership"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				prefix = []string{"--rig", "rig"}
+			}
+			run := func(args ...string) (int, string) {
+				t.Helper()
+				var out, stderr bytes.Buffer
+				code := doBd(append(append([]string{}, prefix...), args...), &out, &stderr)
+				if code != 0 {
+					return code, out.String() + stderr.String()
+				}
+				return code, out.String()
+			}
+			code, output := run("show", ticket.ID, "--json")
+			var rows []struct {
+				Revision int64 `json:"revision"`
+			}
+			if code != 0 || json.Unmarshal([]byte(output), &rows) != nil || len(rows) != 1 || rows[0].Revision <= 0 {
+				t.Fatalf("show must expose an opaque revision: exit=%d output=%s", code, output)
+			}
+			observed := rows[0].Revision
+			if err := store.Update(ticket.ID, beads.UpdateOpts{Labels: []string{"hold:mayor"}}); err != nil {
+				t.Fatal(err)
+			}
+			code, output = run("update", ticket.ID, "--if-revision", fmt.Sprint(observed), "--status", "in_progress", "--assignee", "replacement", "--json")
+			if code == 0 || !strings.Contains(output, "revision") {
+				t.Fatalf("stale recovery must fail: exit=%d output=%s", code, output)
+			}
+			after, err := store.Get(ticket.ID)
+			if err != nil || after.Status != "open" || after.Assignee != "" || !strings.Contains(strings.Join(after.Labels, ","), "hold:mayor") {
+				t.Fatalf("stale recovery changed protected work: %+v, %v", after, err)
+			}
+			code, output = run("update", ticket.ID, "--if-revision", fmt.Sprint(after.Revision), "--title", "guarded update", "--json")
+			if code != 0 {
+				t.Fatalf("current revision update failed: %s", output)
+			}
+			code, output = run("update", ticket.ID, "--if-revision", fmt.Sprint(after.Revision), "--title", "replayed update")
+			if code == 0 {
+				t.Fatalf("replayed revision succeeded: %s", output)
+			}
+			for _, invalid := range []string{"0", "-1", "garbage"} {
+				if code, output := run("update", ticket.ID, "--if-revision", invalid, "--title", "invalid"); code == 0 {
+					t.Fatalf("invalid revision %q succeeded: %s", invalid, output)
+				}
+			}
+		})
+	}
+}
+
 func TestSQLiteWorkControllerRigLifecycle(t *testing.T) {
 	city, rig, cfg := sqliteWorkTestCity(t)
 	if err := startBeadsLifecycleResolvingCityDatabase(city, cfg, &bytes.Buffer{}, nil); err != nil {

@@ -26,12 +26,13 @@ type sqliteWorkComment struct {
 
 type sqliteWorkView struct {
 	beads.Bead
+	Revision int64               `json:"revision"`
 	Notes    string              `json:"notes,omitempty"`
 	Comments []sqliteWorkComment `json:"comments,omitempty"`
 }
 
 func sqliteWorkBeadView(b beads.Bead) (sqliteWorkView, error) {
-	view := sqliteWorkView{Bead: b, Notes: b.Metadata[sqliteWorkNotesKey]}
+	view := sqliteWorkView{Bead: b, Revision: b.Revision, Notes: b.Metadata[sqliteWorkNotesKey]}
 	if value := b.Metadata[sqliteWorkCommentsKey]; value != "" {
 		if err := json.Unmarshal([]byte(value), &view.Comments); err != nil {
 			return view, fmt.Errorf("reading comments of %s: %w", b.ID, err)
@@ -65,6 +66,7 @@ func runSQLiteWorkBd(cityPath string, cfg *config.City, target execStoreTarget, 
 	assignee := flags.StringP("assignee", "a", "", "assignee")
 	matchAssignee := flags.String("if-assignee", "", "update only this owner")
 	matchStatus := flags.String("if-status", "", "update only this status")
+	matchRevision := flags.Int64("if-revision", 0, "update only this exact observed revision")
 	idFlag := flags.String("id", "", "exact ID")
 	parent := flags.String("parent", "", "parent ID")
 	externalRef := flags.String("external-ref", "", "external issue URL")
@@ -100,7 +102,7 @@ func runSQLiteWorkBd(cityPath string, cfg *config.City, target execStoreTarget, 
 		"list":               "type status assignee parent labels all limit",
 		"ready":              "assignee labels limit",
 		"show":               "",
-		"update":             "title description type status priority assignee parent labels add-label remove-label metadata set-metadata unset-metadata notes append-notes claim external-ref if-assignee if-status",
+		"update":             "title description type status priority assignee parent labels add-label remove-label metadata set-metadata unset-metadata notes append-notes claim external-ref if-assignee if-status if-revision",
 		"heartbeat":          "",
 		"reclaim":            "id",
 		"close":              "reason",
@@ -121,6 +123,9 @@ func runSQLiteWorkBd(cityPath string, cfg *config.City, target execStoreTarget, 
 	})
 	if flagErr != nil {
 		return flagErr
+	}
+	if flags.Changed("if-revision") && *matchRevision <= 0 {
+		return errors.New("--if-revision must be positive")
 	}
 	if *priority < 0 || *priority > 4 {
 		return errors.New("priority must be between 0 and 4")
@@ -441,13 +446,16 @@ func runSQLiteWorkBd(cityPath string, cfg *config.City, target execStoreTarget, 
 			value := "open"
 			opts.Status = &value
 		}
-		if (*appendNotes != "" || flags.Changed("if-assignee") || flags.Changed("if-status")) && len(opts.UnsetMetadata) > 0 {
+		if (*appendNotes != "" || flags.Changed("if-assignee") || flags.Changed("if-status") || flags.Changed("if-revision")) && len(opts.UnsetMetadata) > 0 {
 			return errors.New("conditional updates and --append-notes cannot be combined with --unset-metadata")
 		}
 		for attempt := 0; attempt < 8; attempt++ {
 			b, err := store.Get(id)
 			if err != nil {
 				return err
+			}
+			if flags.Changed("if-revision") && b.Revision != *matchRevision {
+				return fmt.Errorf("revision precondition failed for %s: expected %d, found %d", id, *matchRevision, b.Revision)
 			}
 			if flags.Changed("if-assignee") && b.Assignee != *matchAssignee || flags.Changed("if-status") && b.Status != *matchStatus {
 				return printRows([]beads.Bead{b})
@@ -469,6 +477,9 @@ func runSQLiteWorkBd(cityPath string, cfg *config.City, target execStoreTarget, 
 			}
 			var conflict *beads.PreconditionFailedError
 			if errors.As(err, &conflict) {
+				if flags.Changed("if-revision") {
+					return err
+				}
 				continue
 			}
 			if err != nil {

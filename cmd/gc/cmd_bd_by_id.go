@@ -294,6 +294,7 @@ type bdByIDOp struct {
 	Update        beads.UpdateOpts
 	MatchAssignee *string
 	MatchStatus   *string
+	MatchRevision *int64
 }
 
 // parseBdByIDOp recognizes the by-ID invocations this surface serves. Anything
@@ -403,6 +404,12 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 			set(&op.MatchAssignee, value)
 		case "--if-status":
 			set(&op.MatchStatus, value)
+		case "--if-revision":
+			revision, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || revision <= 0 {
+				return bdByIDOp{}, name, false
+			}
+			op.MatchRevision = &revision
 		case "--type", "-t":
 			set(&op.Update.Type, value)
 		case "--parent":
@@ -441,7 +448,7 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 		// The claim is a compare-and-swap the store owns; bundling other field
 		// writes into it here would either apply them outside that swap or
 		// re-implement it. bd's own `--claim` is likewise its own operation.
-		if bdByIDUpdateWritesFields(op, metadata) || op.MatchAssignee != nil || op.MatchStatus != nil {
+		if bdByIDUpdateWritesFields(op, metadata) || op.MatchAssignee != nil || op.MatchStatus != nil || op.MatchRevision != nil {
 			return bdByIDOp{}, "--claim", false
 		}
 		return bdByIDOp{Verb: bdByIDClaim, ID: op.ID, JSON: op.JSON}, "", true
@@ -466,7 +473,7 @@ var bdByIDUpdateValueFlags = map[string]bool{
 	"-d": true, "--assignee": true, "-a": true, "--type": true, "-t": true,
 	"--parent": true, "--priority": true, "-p": true, "--add-label": true,
 	"--remove-label": true, "--set-metadata": true, "--unset-metadata": true,
-	"--if-assignee": true, "--if-status": true,
+	"--if-assignee": true, "--if-status": true, "--if-revision": true,
 }
 
 // bdByIDUpdateUnrepresentable explains the rejection an operator is most likely
@@ -1887,7 +1894,10 @@ const bdByIDDepTreeLooseEdge = "relates-to"
 // differs rather than assume the bead is thin.
 func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr io.Writer) int {
 	if jsonOut {
-		out, err := json.MarshalIndent([]beads.Bead{b}, "", "  ")
+		out, err := json.MarshalIndent([]struct {
+			beads.Bead
+			Revision int64 `json:"revision"`
+		}{{Bead: b, Revision: b.Revision}}, "", "  ")
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: rendering %q: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1994,7 +2004,7 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 }
 
 func updateBdByIDConditionally(graph storebinding.GraphStore, op bdByIDOp) error {
-	if op.MatchAssignee == nil && op.MatchStatus == nil {
+	if op.MatchAssignee == nil && op.MatchStatus == nil && op.MatchRevision == nil {
 		return graph.Update(op.ID, op.Update)
 	}
 	if len(op.Update.UnsetMetadata) > 0 {
@@ -2005,12 +2015,18 @@ func updateBdByIDConditionally(graph storebinding.GraphStore, op bdByIDOp) error
 		if err != nil {
 			return err
 		}
+		if op.MatchRevision != nil && current.Revision != *op.MatchRevision {
+			return fmt.Errorf("revision precondition failed for %s: expected %d, found %d", op.ID, *op.MatchRevision, current.Revision)
+		}
 		if op.MatchAssignee != nil && current.Assignee != *op.MatchAssignee || op.MatchStatus != nil && current.Status != *op.MatchStatus {
 			return nil
 		}
 		err = graph.UpdateIfMatch(op.ID, current.Revision, op.Update)
 		var conflict *beads.PreconditionFailedError
 		if errors.As(err, &conflict) {
+			if op.MatchRevision != nil {
+				return err
+			}
 			continue
 		}
 		return err

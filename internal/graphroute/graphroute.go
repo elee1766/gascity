@@ -741,6 +741,19 @@ func ApplyGraphRouting(recipe *formula.Recipe, a *config.Agent, routedTo string,
 	}
 
 	defaultRoute := GraphRouteBindingForAgent(*a)
+	for _, named := range cfg.NamedSessions {
+		if named.QualifiedName() != routedTo || named.TemplateQualifiedName() == routedTo {
+			continue
+		}
+		binding, ok, err := ResolveGraphDirectSessionBinding(store, cityName, cfg, routedTo, GraphRouteRigContext(routedTo), deps)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("could not resolve named session %q", routedTo)
+		}
+		return DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, GraphWorkflowRouteVars(recipe, vars), sourceBeadID, scopeKind, scopeRef, storeRef, binding, store, cityName, cfg, deps)
+	}
 	// routedTo is the caller's already-normalized persisted identity. Preserve
 	// it rather than recomputing in case the caller resolved a compatibility
 	// spelling that agentutil intentionally keeps stable on the wire.

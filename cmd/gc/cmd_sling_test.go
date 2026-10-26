@@ -2154,6 +2154,120 @@ func TestCmdSlingDryRunRefusesMissingBead(t *testing.T) {
 	}
 }
 
+func TestCmdSlingDistinctNamedTarget(t *testing.T) {
+	for _, tc := range []struct {
+		name, target, query string
+		wantFailure         bool
+	}{
+		{name: "named", target: "frontend/seat"},
+		{name: "numeric named identity", target: "frontend/worker-2"},
+		{name: "template remains routable", target: "frontend/worker"},
+		{name: "named preserves custom policy", target: "frontend/seat", query: "exit 42", wantFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := setupCmdSlingBeadExistsFixture(t)
+			configPath := filepath.Join(cityDir, "city.toml")
+			contents, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.query != "" {
+				contents = append(contents, []byte(fmt.Sprintf("sling_query = %q\n", tc.query))...)
+			}
+			namedName := "seat"
+			if tc.target != "frontend/worker" {
+				namedName = strings.TrimPrefix(tc.target, "frontend/")
+			}
+			contents = append(contents, []byte(fmt.Sprintf("provider = \"probe\"\nmax_active_sessions = 2\n\n[[named_session]]\nname = %q\ntemplate = \"worker\"\nscope = \"rig\"\ndir = \"frontend\"\nmode = \"on_demand\"\n\n[[agent]]\nname = \"control-dispatcher\"\ndir = \"frontend\"\nprovider = \"probe\"\n\n[providers.probe]\ncommand = \"/bin/true\"\n", namedName))...)
+			if err := os.WriteFile(configPath, contents, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			store, err := openAuthoritativeStoreAtForCity(filepath.Join(cityDir, "frontend"), cityDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			work, err := store.Create(beads.Bead{Title: "named route regression", Type: "task", Status: "open"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			invoke := func(dry bool) int {
+				stdout.Reset()
+				stderr.Reset()
+				return cmdSling([]string{tc.target, work.ID}, false, false, false, "", nil, "", true, false, false, "", true, false, dry, "", "", &stdout, &stderr)
+			}
+			if code := invoke(true); code != 0 {
+				t.Fatalf("dry run: %d stdout=%s stderr=%s", code, &stdout, &stderr)
+			}
+			before, err := store.Get(work.ID)
+			if err != nil || before.Metadata[beadmeta.RoutedToMetadataKey] != "" || before.Assignee != "" {
+				t.Fatalf("dry run mutated source: %+v err=%v", before, err)
+			}
+			code := invoke(false)
+			if (code != 0) != tc.wantFailure {
+				t.Fatalf("route: %d stdout=%s stderr=%s", code, &stdout, &stderr)
+			}
+			after, err := store.Get(work.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantRoute := tc.target
+			if tc.wantFailure {
+				wantRoute = ""
+			}
+			if after.Metadata[beadmeta.RoutedToMetadataKey] != wantRoute {
+				t.Fatalf("route = %q, want %q", after.Metadata[beadmeta.RoutedToMetadataKey], wantRoute)
+			}
+			if tc.wantFailure || tc.target == "frontend/worker" {
+				return
+			}
+			formulaDir := filepath.Join(cityDir, "formulas")
+			if err := os.MkdirAll(formulaDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := "formula = \"named-probe\"\n[requires]\nformula_compiler = \">=2.0.0\"\n[[steps]]\nid = \"execute\"\ntitle = \"Named work\"\n"
+			if err := os.WriteFile(filepath.Join(formulaDir, "named-probe.toml"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			graphWork, err := store.Create(beads.Bead{Title: "named graph regression", Type: "task", Status: "open"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout.Reset()
+			stderr.Reset()
+			if code := cmdSling([]string{tc.target, graphWork.ID}, false, false, false, "", nil, "", true, false, false, "named-probe", false, false, false, "", "", &stdout, &stderr); code != 0 {
+				t.Fatalf("graph route: %d stdout=%s stderr=%s", code, &stdout, &stderr)
+			}
+			cfg, _, err := loadSlingCityConfig(cityDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			graph := resolveGraphStore(cliStorageRoutes(cityDir), store, cfg, cityDir, nil)
+			rows, err := graph.List(beads.ListQuery{AllowScan: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, step := range rows {
+				if step.Metadata[beadmeta.StepIDMetadataKey] != "named-probe.execute" {
+					continue
+				}
+				found = true
+				if step.Assignee == "" || step.Metadata[beadmeta.SessionIDMetadataKey] != step.Assignee || step.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+					t.Fatalf("named graph step is not bound to a concrete session: %+v", step)
+				}
+				owner, err := cliSessionStore(store, cfg, cityDir).Get(step.Assignee)
+				if err != nil || owner.Metadata["configured_named_identity"] != tc.target {
+					t.Fatalf("named graph owner = %+v, err=%v", owner, err)
+				}
+			}
+			if !found {
+				t.Fatal("named graph execution step not found")
+			}
+		})
+	}
+}
+
 func TestCmdSlingDryRunPreviewsInlineText(t *testing.T) {
 	cityDir := setupCmdSlingBeadExistsFixture(t)
 

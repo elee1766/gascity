@@ -239,6 +239,11 @@ func NormalizePoolRouteTarget(cfg *config.City, target string) string {
 	if _, ok := findAgentByQualified(cfg, target); ok {
 		return target
 	}
+	for _, named := range cfg.NamedSessions {
+		if named.QualifiedName() == target {
+			return target
+		}
+	}
 	for i := range cfg.Agents {
 		a := cfg.Agents[i]
 		if !IsMultiSessionAgent(&a) {

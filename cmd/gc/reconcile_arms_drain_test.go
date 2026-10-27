@@ -167,7 +167,7 @@ func TestConfigDriftResolvedCancels(t *testing.T) {
 	live := runtime.LiveFingerprint(sessionCoreConfigForHashInfo(tp, info)) // A8 leaves a stored live hash alone
 	resolved := func(w *World) {
 		w.Env = &reconcileEnv{Cfg: cfg}
-		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
+		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(w.Census.Rows[rowKeyOf("gc-1")].Info): {TP: tp}}}
 	}
 	attached := func(w *World) {
 		w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive, Attached: true}}

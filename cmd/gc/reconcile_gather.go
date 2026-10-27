@@ -441,12 +441,15 @@ func censusDemandEnv(c *sessionCensus, store beads.Store, rigs map[string]beads.
 // trigger fields resolveTemplateForSessionBeadInfo stamps, and whether a
 // pool seat's unassigned alias defers (poolRuntimeAliasIsDeferredInfo, which
 // the realize path reads off the state, the claim and an alias conflict).
+// The committed launch fingerprint invalidates an older resolution after a
+// fresh launch probes changed files within the same config generation.
 type templateMemoKey struct {
 	ID, Template, CommonName, SessionName, SessionNameExplicit, AgentName, Alias string
 	Origin, ManualMetadata, PoolSlot, NamedIdentity                              string
 	Named, PoolManaged, DependencyOnly                                           bool
 	TriggerBeadID, TriggerStoreRef, Pack                                         string
 	AliasDeferred                                                                bool
+	StartedConfigHash                                                            string
 }
 
 func templateMemoKeyOf(info session.Info) templateMemoKey {
@@ -457,7 +460,8 @@ func templateMemoKeyOf(info session.Info) templateMemoKey {
 		NamedIdentity: info.ConfiguredNamedIdentity, Named: info.ConfiguredNamedSession, PoolManaged: info.PoolManaged,
 		DependencyOnly: info.DependencyOnly,
 		TriggerBeadID:  info.TriggerBeadID, TriggerStoreRef: info.TriggerBeadStoreRef, Pack: info.Pack,
-		AliasDeferred: poolRuntimeAliasIsDeferredInfo(info),
+		AliasDeferred:     poolRuntimeAliasIsDeferredInfo(info),
+		StartedConfigHash: info.StartedConfigHash,
 	}
 }
 

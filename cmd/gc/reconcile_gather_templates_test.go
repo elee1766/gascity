@@ -262,7 +262,7 @@ func TestTemplateMemoKeyCoversResolverReads(t *testing.T) {
 		"ID": true, "Template": true, "CommonName": true, "SessionNameMetadata": true, "SessionNameExplicit": true,
 		"AgentName": true, "Alias": true, "SessionOrigin": true, "ManualSessionMetadata": true, "PoolSlot": true,
 		"ConfiguredNamedIdentity": true, "ConfiguredNamedSession": true, "PoolManaged": true, "DependencyOnly": true,
-		"TriggerBeadID": true, "TriggerBeadStoreRef": true, "Pack": true, "Closed": true,
+		"TriggerBeadID": true, "TriggerBeadStoreRef": true, "Pack": true, "Closed": true, "StartedConfigHash": true,
 	}
 	c.cfg.Agents = append(c.cfg.Agents,
 		config.Agent{Name: "solo", StartCommand: "true", MaxActiveSessions: intPtr(1)},
@@ -535,4 +535,50 @@ func (s *countingReadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 func (s *countingReadStore) Get(id string) (beads.Bead, error) {
 	s.reads++
 	return s.Store.Get(id)
+}
+
+// A fresh launch must not be drained repeatedly against a pre-launch script hash.
+func TestTemplateMemoConvergesAfterScriptEditAndLaunch(t *testing.T) {
+	c := newTemplateCity(t)
+	scriptDir := filepath.Join(c.cityPath, "scripts")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(scriptDir, "worker-helper.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho old\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	info := c.named(t, nil)
+	env := &reconcileEnv{Gen: 1, Cfg: c.cfg, SP: runtime.NewFake()}
+	e := gatherEnv{Templates: func(*reconcileEnv, time.Time) templateResolver { return newTemplateResolver(c.params()) }}
+	rows := []censusRow{{Info: info}}
+	var memo gatherMemo
+	memo.refresh(e, env, templatesNow, rows, nil)
+	initial, ok := memo.templates.Load().lookup(info)
+	if !ok || initial.Err != nil {
+		t.Fatalf("initial resolve: %v %v", ok, initial.Err)
+	}
+	initialHash := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(initial.TP, info))
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho edited\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	launch, ok := memo.templates.Load().launchTemplate(info, templatesNow.Add(time.Minute))
+	if !ok {
+		t.Fatalf("launch resolve: %v", launch.Err)
+	}
+	launchHash := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(launch.TP, info))
+	if launchHash == initialHash {
+		t.Fatal("script edit was not represented in launch fingerprint")
+	}
+	info.StartedConfigHash = launchHash
+	rows[0].Info = info
+	memo.refresh(e, env, templatesNow.Add(2*time.Minute), rows, nil)
+	desired, ok := memo.templates.Load().lookup(info)
+	if !ok || desired.Err != nil {
+		t.Fatalf("desired resolve: %v %v", ok, desired.Err)
+	}
+	desiredHash := runtime.CoreFingerprint(sessionCoreConfigForHashInfo(desired.TP, info))
+	if desiredHash != launchHash {
+		t.Fatalf("fresh launch never converges: initial=%s desired=%s launch=%s", initialHash, desiredHash, launchHash)
+	}
 }

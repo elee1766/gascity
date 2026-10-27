@@ -1361,6 +1361,12 @@ last verified phase, and a write whose outcome cannot be proven exits 2 for
 operator reconciliation instead of retrying. Without --apply the command
 only runs the preflight and prints the plan.
 
+When the retired owner holds more than one pair, name each other pair with
+--sibling-pair SOURCE:STEP. Each sibling is verified to be the same
+retired owner's source and step of one workflow, and only those records
+may remain owned by the retired identity. Run the command once per pair,
+naming the not-yet-released pairs as siblings.
+
 ```
 gc convoy release-pair <source-bead-id> [flags]
 ```
@@ -1374,6 +1380,7 @@ gc convoy release-pair <source-bead-id> [flags]
 | `--json` | bool |  | Output JSON |
 | `--manifest` | string |  | Manifest path (default &lt;city&gt;/.gc/handovers/&lt;handover-id&gt;.json) |
 | `--old-session` | string |  | Closed session bead that held the pair (required) |
+| `--sibling-pair` | stringSlice |  | Other SOURCE:STEP pair held by the same retired owner (repeatable) |
 | `--step` | string |  | Execution step bead owned by the same dead owner (required) |
 | `--stop-after` | string |  | Stop after this phase (fence-step, fence-source, prepare-step, prepare-source, prepare-root, release-source, release-step) |
 

@@ -604,7 +604,9 @@ func (s *Session) finishTool(ts time.Time, t *toolState, incomplete string) {
 	}
 	out, _ := s.text(output)
 	in := s.json(t.input)
-	attrs := s.toolAttrs(t)
+	attrs := append(s.toolAttrs(t),
+		intAttr("gc.tool.input_bytes", int64(len(t.input))),
+		intAttr("gc.tool.output_bytes", int64(len(output))))
 	status, sev := 1, sevInfo
 	if t.status == "failed" {
 		status, sev = 2, sevWarn
@@ -613,9 +615,9 @@ func (s *Session) finishTool(ts time.Time, t *toolState, incomplete string) {
 		status = 0
 		attrs = append(attrs, strAttr("gc.tool.incomplete", incomplete))
 	}
+	attrs = appendStr(attrs, "gc.content.tool_input", in)
 	s.emitLog(ts, sev, "conversation.tool_result", out, t.spanID, attrs)
 	spanAttrs := append(s.baseAttrs(), attrs...)
-	spanAttrs = appendStr(spanAttrs, "gc.content.tool_input", in)
 	spanAttrs = appendStr(spanAttrs, "gc.content.tool_output", out)
 	if t.location != "" {
 		loc, _ := s.text(t.location)

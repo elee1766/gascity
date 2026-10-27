@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -181,6 +182,12 @@ func TestRecordedConversationCorrelation(t *testing.T) {
 	}
 	if attr(tool, "gc.content.tool_input") != `{"command":"go test ./..."}` || !strings.Contains(attr(tool, "gc.content.tool_output"), "ok  ./...") {
 		t.Fatalf("tool content = %q / %q", attr(tool, "gc.content.tool_input"), attr(tool, "gc.content.tool_output"))
+	}
+	results := byEvent(c.logs, "conversation.tool_result")
+	if len(results) != 1 || attr(results[0], "gc.content.tool_input") != `{"command":"go test ./..."}` ||
+		attr(results[0], "gc.tool.input_bytes") != strconv.Itoa(len(`{"command":"go test ./..."}`)) ||
+		attr(results[0], "gc.tool.output_bytes") != strconv.Itoa(len(body(results[0]))) {
+		t.Fatalf("tool_result attrs = %v", results)
 	}
 
 	statuses := map[string]int{}

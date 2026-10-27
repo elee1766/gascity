@@ -20,6 +20,8 @@ Logs (each carries `traceId` and `spanId` of the turn or tool it belongs to, and
 
 Content lives in the log body and in `gc.content.*` attributes (`gc.content.prompt`, `gc.content.tool_input`, `gc.content.tool_output`). These names are distinct from the operational `args`, `stdout` and `tool_input` attributes, so collector rules that drop those do not drop conversation content. A collector allowlist must keep `gc.content.*` explicitly.
 
+`conversation.tool_result` repeats the redacted `gc.content.tool_input`, so one record shows a call and its result. It also carries `gc.tool.input_bytes` and `gc.tool.output_bytes`, the raw sizes before redaction and truncation.
+
 Attribution attributes appear only when the launch env provides them: `gc.session.id`, `gc.session.name`, `gc.city`, `gc.rig`, `gc.agent`, `gc.template`, `gc.provider`, `gen_ai.request.model`, `gc.bead_id.launch`, `gc.workflow_trace`, `gc.continuation_epoch`, `gc.runtime_epoch`, `acp.session_id`, `process.pid`. Missing values are omitted, never guessed.
 
 Reasoning: only `agent_thought_chunk` blocks the provider sends over ACP are exported, tagged `gc.reasoning.source=provider_exposed`. Hidden reasoning is not visible to Gas City and is never claimed.

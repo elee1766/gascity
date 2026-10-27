@@ -104,6 +104,36 @@ describe('BeadBoard', () => {
     expect(screen.getAllByText('unresolved').length).toBeGreaterThan(0);
   });
 
+  it('shows rig, grouped steps and a source/step mismatch on the source row', () => {
+    const graph = buildBeadGraph([bead('gci-1', 'open', { title: 'source ticket' })]);
+    render(
+      <BeadBoard
+        columns={graph.columns}
+        selectedId={null}
+        onSelect={vi.fn()}
+        annotationOf={(id) =>
+          id === 'gci-1'
+            ? {
+                rig: 'gascity',
+                steps: [
+                  { id: 'gcg-2', name: 'deliver', status: 'blocked', holds: ['hold:external'] },
+                ],
+                convoys: ['gci-3'],
+                mismatches: ['step deliver blocked, source open'],
+              }
+            : null
+        }
+      />,
+    );
+    const row = screen.getByTitle('Select gci-1');
+    expect(within(row).getByTestId('bead-rig').textContent).toBe('gascity');
+    expect(within(row).getByText(/deliver blocked hold:external/)).toBeTruthy();
+    expect(within(row).getByText('convoy gci-3')).toBeTruthy();
+    expect(within(row).getByTestId('bead-mismatch').textContent).toContain(
+      'step deliver blocked, source open',
+    );
+  });
+
   it('keeps the board to at most one maroon mark (the blocked count)', () => {
     const { container } = renderBoard([
       bead('A', 'blocked'),

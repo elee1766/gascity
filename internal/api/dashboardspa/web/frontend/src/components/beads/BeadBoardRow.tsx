@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { BeadNode } from '../../lib/beadGraph';
 import type { BadgeSeverity } from '../../attention/compose';
 import { attentionListItemProps } from '../../attention/routeHighlight';
+import type { WorkAnnotation } from '../../lib/beadClassify';
 
 // One bead on the board, in the editorial register: a typeset row, no card,
 // no side-stripe. Selection is carried by weight + a leading "▸" + a warm
@@ -21,6 +22,8 @@ interface BeadBoardRowProps {
    * opening the modal.
    */
   note?: string | null;
+  /** Rig, grouped workflow steps and convoys for this work bead. */
+  annotation?: WorkAnnotation | null;
   onSelect: (beadId: string) => void;
 }
 
@@ -38,6 +41,7 @@ export function BeadBoardRow({
   selected,
   attentionSeverity = null,
   note = null,
+  annotation = null,
   onSelect,
 }: BeadBoardRowProps) {
   const { bead, deps, blocks, hasUnresolvedDeps } = node;
@@ -86,6 +90,11 @@ export function BeadBoardRow({
         </span>
         <span className="flex items-baseline gap-3 pl-4 mt-0.5 text-label uppercase tracking-wider text-fg-faint">
           <span className="tnum">{bead.id}</span>
+          {annotation !== null && (
+            <span className="normal-case tracking-normal" data-testid="bead-rig">
+              {annotation.rig}
+            </span>
+          )}
           {bead.priority != null && <span className="tnum">P{bead.priority}</span>}
           {hasNeighbourhood && (
             <span className="tnum normal-case tracking-normal">
@@ -98,6 +107,30 @@ export function BeadBoardRow({
             <span className="normal-case tracking-normal text-warn">unresolved</span>
           )}
         </span>
+        {annotation !== null && annotation.steps.length > 0 && (
+          <span className="block pl-4 mt-0.5 text-label normal-case tracking-normal text-fg-faint">
+            {annotation.steps.map((step, index) => (
+              <span key={step.id} title={step.id}>
+                {index > 0 && ' · '}
+                {step.name} {step.status.replace('_', ' ')}
+                {step.holds.length > 0 && ` ${step.holds.join(' ')}`}
+              </span>
+            ))}
+          </span>
+        )}
+        {annotation !== null && annotation.convoys.length > 0 && (
+          <span className="block pl-4 mt-0.5 text-label normal-case tracking-normal text-fg-faint">
+            convoy {annotation.convoys.join(', ')}
+          </span>
+        )}
+        {annotation !== null && annotation.mismatches.length > 0 && (
+          <span
+            className="block pl-4 mt-0.5 text-label normal-case tracking-normal text-warn"
+            data-testid="bead-mismatch"
+          >
+            mismatch: {annotation.mismatches.join('; ')}
+          </span>
+        )}
         {note !== null && note.length > 0 && (
           <span
             className={`block pl-4 mt-0.5 text-label normal-case tracking-normal ${noteTone(

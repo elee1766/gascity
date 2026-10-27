@@ -2,6 +2,7 @@ import type { BeadGraph } from '../../lib/beadGraph';
 import { selectColumns } from '../../lib/beadGraph';
 import { BeadBoard } from './BeadBoard';
 import type { BadgeSeverity } from '../../attention/compose';
+import type { WorkAnnotation } from '../../lib/beadClassify';
 
 // One rig's slice of the board (gascity-dashboard-6frc). The board groups
 // by rig so a city with hundreds of beads stays parseable — each rig gets a
@@ -21,6 +22,7 @@ interface BeadBoardSectionProps {
   attentionSeverity?: (beadId: string) => BadgeSeverity | null;
   /** Liveness note per bead for in-progress rows (gp-6xd); see BeadBoardRow. */
   noteOf?: (beadId: string) => string | null;
+  annotationOf?: (beadId: string) => WorkAnnotation | null;
   onSelect: (beadId: string) => void;
 }
 
@@ -32,6 +34,7 @@ export function BeadBoardSection({
   selectedId,
   attentionSeverity,
   noteOf,
+  annotationOf,
   onSelect,
 }: BeadBoardSectionProps) {
   const columns = selectColumns(graph, ids);
@@ -46,6 +49,7 @@ export function BeadBoardSection({
         selectedId={selectedId}
         {...(attentionSeverity === undefined ? {} : { attentionSeverity })}
         {...(noteOf === undefined ? {} : { noteOf })}
+        {...(annotationOf === undefined ? {} : { annotationOf })}
         onSelect={onSelect}
       />
     </section>

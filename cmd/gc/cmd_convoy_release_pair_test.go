@@ -449,3 +449,45 @@ func TestReleasePairReconcilesInterruptedWrites(t *testing.T) {
 		t.Fatalf("step retried after unknown outcome: %+v", row)
 	}
 }
+
+// One retired owner holding two pairs hands over each pair by naming the
+// other as a sibling; an unnamed or mismatched sibling is still refused.
+func TestReleasePairHandsOverSiblingPairs(t *testing.T) {
+	c := newReleasePairCity(t)
+	src2 := c.create("second source")
+	convoy2 := c.jsonMap("convoy", "create", "second input", src2, "--json")["convoy_id"].(string)
+	mapping := c.jsonMap("formula", "cook", "pair", "--json")["id_mapping"].(map[string]any)
+	step2, root2 := mapping["pair.deliver"].(string), mapping["pair"].(string)
+	c.run("bd", "update", root2, "--set-metadata", "gc.input_convoy_id="+convoy2, "--set-metadata", "gc.routed_to=worker",
+		"--set-metadata", "gc.source_bead_id="+src2)
+	c.run("bd", "update", src2, "--assignee", releasePairDeadOwner, "--status", "blocked", "--set-metadata", "gc.execution_routed_to=worker")
+	c.run("bd", "update", step2, "--assignee", releasePairDeadOwner, "--status", "blocked",
+		"--set-metadata", "gc.session_name=pool-retired", "--set-metadata", "gc.routed_to=worker")
+
+	if _, errOut, code := c.releasePair(); code != 1 || !strings.Contains(errOut, "hand it over first") {
+		t.Fatalf("unnamed sibling not refused: exit %d %s", code, errOut)
+	}
+	if _, errOut, code := c.releasePair("--sibling-pair", src2+":"+c.step); code != 1 || !strings.Contains(errOut, "overlaps") {
+		t.Fatalf("overlapping sibling not refused: exit %d %s", code, errOut)
+	}
+	if _, errOut, code := c.releasePair("--sibling-pair", c.convoy+":"+step2); code != 1 || !strings.Contains(errOut, "sibling") {
+		t.Fatalf("mismatched sibling not refused: exit %d %s", code, errOut)
+	}
+
+	if out, errOut, code := c.releasePair("--apply", "--sibling-pair", src2+":"+step2); code != 0 || !strings.Contains(out, "result=released") {
+		t.Fatalf("first pair: exit %d out=%s err=%s", code, out, errOut)
+	}
+	if s := c.show(src2); s.Assignee != releasePairDeadOwner || s.Status != "blocked" {
+		t.Fatalf("sibling touched by the first handover: %+v", s)
+	}
+	out, errOut, code := c.exec("convoy", "release-pair", src2, "--step", step2, "--from", releasePairDeadOwner,
+		"--old-session", c.session, "--handover-id", "h2", "--manifest", filepath.Join(c.dir, "handover2.json"), "--apply")
+	if code != 0 || !strings.Contains(out, "result=released") {
+		t.Fatalf("second pair: exit %d out=%s err=%s", code, out, errOut)
+	}
+	for _, id := range []string{c.source, c.step, src2, step2} {
+		if row := c.show(id); row.Assignee != "" || row.Status != "open" || slices.Contains(row.Labels, "hold:mayor") {
+			t.Fatalf("%s not released: %+v", id, row)
+		}
+	}
+}

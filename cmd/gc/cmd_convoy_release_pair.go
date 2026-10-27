@@ -51,6 +51,7 @@ type releasePairOptions struct {
 	HandoverID string
 	Manifest   string
 	ClearHolds []string
+	Siblings   []string
 	StopAfter  string
 	Apply      bool
 	JSON       bool
@@ -91,6 +92,7 @@ type releasePairManifest struct {
 	From       string                     `json:"from"`
 	OldSession string                     `json:"old_session"`
 	ClearHolds []string                   `json:"clear_holds,omitempty"`
+	Siblings   []string                   `json:"sibling_pairs,omitempty"`
 	CreatedAt  string                     `json:"created_at"`
 	Preimage   map[string]releasePairSnap `json:"preimage"`
 	Expected   map[string]releasePairSnap `json:"expected"`
@@ -139,7 +141,13 @@ Holds present before the run are kept unless named with --clear-hold.
 Progress is persisted to a manifest so an interrupted run resumes from the
 last verified phase, and a write whose outcome cannot be proven exits 2 for
 operator reconciliation instead of retrying. Without --apply the command
-only runs the preflight and prints the plan.`,
+only runs the preflight and prints the plan.
+
+When the retired owner holds more than one pair, name each other pair with
+--sibling-pair SOURCE:STEP. Each sibling is verified to be the same
+retired owner's source and step of one workflow, and only those records
+may remain owned by the retired identity. Run the command once per pair,
+naming the not-yet-released pairs as siblings.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			opts.Source = args[0]
@@ -152,6 +160,7 @@ only runs the preflight and prints the plan.`,
 	cmd.Flags().StringVar(&opts.HandoverID, "handover-id", "", "Stable handover identifier (default pair-<source>-<step>)")
 	cmd.Flags().StringVar(&opts.Manifest, "manifest", "", "Manifest path (default <city>/.gc/handovers/<handover-id>.json)")
 	cmd.Flags().StringSliceVar(&opts.ClearHolds, "clear-hold", nil, "Pre-existing hold label the operator is authorized to clear (repeatable)")
+	cmd.Flags().StringSliceVar(&opts.Siblings, "sibling-pair", nil, "Other SOURCE:STEP pair held by the same retired owner (repeatable)")
 	cmd.Flags().StringVar(&opts.StopAfter, "stop-after", "", "Stop after this phase ("+strings.Join(releasePairPhases, ", ")+")")
 	cmd.Flags().BoolVar(&opts.Apply, "apply", false, "Perform the handover; without it only the preflight runs")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output JSON")
@@ -182,6 +191,17 @@ func cmdConvoyReleasePair(opts releasePairOptions, stdout, stderr io.Writer) int
 		if !beadmeta.HasDispatchHold([]string{hold}) {
 			return fail(1, "--clear-hold %q is not a dispatch hold label", hold)
 		}
+	}
+	for i, pair := range opts.Siblings {
+		src, step, ok := strings.Cut(strings.TrimSpace(pair), ":")
+		src, step = strings.TrimSpace(src), strings.TrimSpace(step)
+		if !ok || src == "" || step == "" || strings.Contains(step, ":") {
+			return fail(1, "--sibling-pair %q must be SOURCE:STEP", pair)
+		}
+		if src == opts.Source || step == opts.Step || src == step {
+			return fail(1, "--sibling-pair %q overlaps the pair being released", pair)
+		}
+		opts.Siblings[i] = src + ":" + step
 	}
 	if opts.StopAfter != "" && !slices.Contains(releasePairPhases, opts.StopAfter) {
 		return fail(1, "--stop-after %q is not a phase", opts.StopAfter)
@@ -309,6 +329,9 @@ func (r *releasePairRun) result(m *releasePairManifest, outcome, detail string) 
 func (r *releasePairRun) matchesManifest(m *releasePairManifest) error {
 	if m.HandoverID != r.opts.HandoverID || m.Source != r.opts.Source || m.Step != r.opts.Step || m.From != r.opts.From || m.OldSession != r.opts.OldSession {
 		return fmt.Errorf("manifest %s records a different handover; inspect it instead of reusing it", r.opts.Manifest)
+	}
+	if !slices.Equal(sortedStrings(m.Siblings), sortedStrings(r.opts.Siblings)) {
+		return fmt.Errorf("manifest %s was prepared with --sibling-pair %v; resume with the same pairs", r.opts.Manifest, m.Siblings)
 	}
 	if !slices.Equal(sortedStrings(m.ClearHolds), sortedStrings(r.opts.ClearHolds)) {
 		return fmt.Errorf("manifest %s was authorized with --clear-hold %v; resume with the same authority", r.opts.Manifest, m.ClearHolds)
@@ -458,6 +481,7 @@ func (r *releasePairRun) preflight() (*releasePairManifest, error) {
 		From:       o.From,
 		OldSession: o.OldSession,
 		ClearHolds: sortedStrings(o.ClearHolds),
+		Siblings:   sortedStrings(o.Siblings),
 		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
 		Preimage:   map[string]releasePairSnap{},
 		Expected:   map[string]releasePairSnap{},
@@ -472,12 +496,16 @@ func (r *releasePairRun) preflight() (*releasePairManifest, error) {
 		m.Preimage[id] = releasePairSnapOf(b)
 		m.Expected[id] = releasePairSnapOf(b)
 	}
+	siblingIDs, err := r.verifySiblings(m, session.SessionName)
+	if err != nil {
+		return nil, err
+	}
 	inv, err := r.inventory(m)
 	if err != nil {
 		return nil, err
 	}
 	for _, ref := range inv.References {
-		if ref.Assignee == o.From {
+		if ref.Assignee == o.From && !siblingIDs[ref.ID] {
 			return nil, fmt.Errorf("open reference %s is also owned by %q; hand it over first", ref.ID, o.From)
 		}
 	}
@@ -486,6 +514,61 @@ func (r *releasePairRun) preflight() (*releasePairManifest, error) {
 	}
 	m.Inventory = inv
 	return m, nil
+}
+
+// verifySiblings checks each named sibling is another source/step pair of the
+// same retired owner and returns the ids allowed to stay owned by it.
+func (r *releasePairRun) verifySiblings(m *releasePairManifest, oldSessionName string) (map[string]bool, error) {
+	allowed := map[string]bool{}
+	for _, pair := range m.Siblings {
+		srcID, stepID, _ := strings.Cut(pair, ":")
+		if allowed[srcID] || allowed[stepID] || slices.Contains(m.ids(), srcID) || slices.Contains(m.ids(), stepID) {
+			return nil, fmt.Errorf("sibling pair %s overlaps another pair", pair)
+		}
+		_, src, err := r.resolve(srcID)
+		if err != nil {
+			return nil, err
+		}
+		_, step, err := r.resolve(stepID)
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range []beads.Bead{src, step} {
+			if b.Assignee != m.From {
+				return nil, fmt.Errorf("sibling %s is assigned to %q, not %q", b.ID, b.Assignee, m.From)
+			}
+			if b.Status == "closed" {
+				return nil, fmt.Errorf("sibling %s is closed", b.ID)
+			}
+			if err := releasePairSessionRefsStale(b, m.OldSession, oldSessionName); err != nil {
+				return nil, fmt.Errorf("sibling %w", err)
+			}
+		}
+		rootID := strings.TrimSpace(step.Metadata[beadmeta.RootBeadIDMetadataKey])
+		if rootID == "" || rootID == m.Root {
+			return nil, fmt.Errorf("sibling step %s does not belong to a separate workflow", step.ID)
+		}
+		_, root, err := r.resolve(rootID)
+		if err != nil {
+			return nil, err
+		}
+		if s := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey]); s != "" && s != src.ID {
+			return nil, fmt.Errorf("sibling root %s is sourced from %s, not %s", root.ID, s, src.ID)
+		}
+		convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
+		if convoyID == "" {
+			return nil, fmt.Errorf("sibling root %s carries no %s", root.ID, beadmeta.InputConvoyIDMetadataKey)
+		}
+		convoyStore, _, err := r.resolve(convoyID)
+		if err != nil {
+			return nil, err
+		}
+		if err := releasePairConvoyTracks(convoyStore, convoyID, src.ID); err != nil {
+			return nil, fmt.Errorf("sibling %w", err)
+		}
+		allowed[src.ID], allowed[step.ID] = true, true
+	}
+	return allowed, nil
 }
 
 // releasePairSessionRefsStale refuses a record bound to any session other than

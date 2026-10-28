@@ -21,6 +21,7 @@ package main
 // cadence until it is rerouted or released.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -381,23 +382,35 @@ func namedSessionBacks(cfg *config.City, agent *config.Agent) bool {
 	return false
 }
 
-// onlyStrandedWork reports that info holds claims, and that every one would
-// stay on its closed row under the cascade's rule (no lane serves it): a
-// close may land over them, keep them and alert (O5, revised). sw's rows are
-// read first, so a served claim among them answers false with no live read;
-// only then is the seat read live, which must agree. A failed read, or no
-// claim at all, reports false.
-func onlyStrandedWork(sw *SeatWork, info sessionpkg.Info) bool {
+// onlyStrandedWork reports that every held claim is unserved under why's
+// release policy. A close may land over those claims and let its cascade
+// recover or alert on them. Both the snapshot and live read must agree;
+// a failed read, a served claim, or no claims reports false.
+func onlyStrandedWork(sw *SeatWork, info sessionpkg.Info, why releaseWhy) bool {
 	scope := releaseScope(info, sw.Legs().cfg)
 	q := seatWorkQuery{scope: scope, statuses: seatWorkStatuses}
 	seat := releaseSeatOfInfo(info)
+	policy := releasePolicies[why]
+	fallback := ""
+	if policy.seatRoute {
+		fallback = seat.fallback
+	}
 	stranded := func(hits []seatWorkHit, err error) bool {
 		if err != nil || len(hits) == 0 {
 			return false
 		}
 		return !slices.ContainsFunc(hits, func(h seatWorkHit) bool {
-			_, served := releaseRoute(sw.Legs().cfg, h.bead, seat.fallback, laneCarried)
-			return served
+			_, served := releaseRoute(sw.Legs().cfg, h.bead, fallback, policy.lane)
+			if served {
+				return true
+			}
+			if policy.pool {
+				if spec := strings.TrimSpace(h.bead.Metadata[detachedProbeMetadataKey]); spec != "" {
+					// Closing must not bypass a live or unknown detached runtime.
+					return probeDetachedWork(context.Background(), spec).Status != detachedProbeDead
+				}
+			}
+			return false
 		})
 	}
 	return stranded(sw.snapshot(q, false)) && stranded(sw.fresh(scope).match(q, false))

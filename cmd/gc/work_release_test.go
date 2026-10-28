@@ -792,20 +792,20 @@ func TestStampStrandedSkipsAMovedClaim(t *testing.T) {
 func TestOnlyStrandedWork(t *testing.T) {
 	cfg := servingCity("repo/worker")
 	info := session.Info{ID: "gc-1", SessionNameMetadata: "s-1", Template: "repo/worker"}
-	if onlyStrandedWork(testSeatWork("", cfg, beads.NewMemStore(), nil), info) {
+	if onlyStrandedWork(testSeatWork("", cfg, beads.NewMemStore(), nil), info, releaseCloseCascade) {
 		t.Fatal("a seat holding nothing reads stranded-only (N19)")
 	}
-	if onlyStrandedWork(testSeatWork("", cfg, failingListStore{Store: beads.NewMemStore()}, nil), info) {
+	if onlyStrandedWork(testSeatWork("", cfg, failingListStore{Store: beads.NewMemStore()}, nil), info, releaseCloseCascade) {
 		t.Fatal("a failed read reads stranded-only (N15)")
 	}
 	store := beads.NewMemStore()
 	createWork(t, store, "in_progress", "gc-1", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
-	if !onlyStrandedWork(testSeatWork("", cfg, store, nil), info) {
+	if !onlyStrandedWork(testSeatWork("", cfg, store, nil), info, releaseCloseCascade) {
 		t.Fatal("an unserved claim alone does not read stranded-only")
 	}
 	createWork(t, store, "in_progress", "gc-1", map[string]string{beadmeta.RunTargetMetadataKey: "repo/worker"})
 	counted := &liveListCounter{Store: store}
-	if onlyStrandedWork(testSeatWork("", cfg, counted, nil), info) {
+	if onlyStrandedWork(testSeatWork("", cfg, counted, nil), info, releaseCloseCascade) {
 		t.Fatal("a plain run_target claim the cascade serves reads stranded (N01)")
 	}
 	if counted.live != 0 {
@@ -855,7 +855,7 @@ func TestOnlyStrandedWorkRefusesADarkLeg(t *testing.T) {
 	city := beads.NewMemStore()
 	createWork(t, city, "in_progress", "gc-1", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
 	rigs := map[string]beads.Store{"frontend": failingListStore{Store: beads.NewMemStore()}}
-	if onlyStrandedWork(testSeatWork("", cfg, city, rigs), info) {
+	if onlyStrandedWork(testSeatWork("", cfg, city, rigs), info, releaseCloseCascade) {
 		t.Fatal("a dark leg read stranded-only")
 	}
 }
@@ -873,7 +873,7 @@ func TestOnlyStrandedWorkConfirmsLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	createWork(t, store, "in_progress", "gc-1", map[string]string{beadmeta.RoutedToMetadataKey: "repo/worker"})
-	if onlyStrandedWork(sw, info) {
+	if onlyStrandedWork(sw, info, releaseCloseCascade) {
 		t.Fatal("a served claim assigned after the tick's read did not hold the close")
 	}
 }

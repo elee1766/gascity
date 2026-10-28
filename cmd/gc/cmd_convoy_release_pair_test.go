@@ -20,17 +20,18 @@ import (
 // sqlite-beads binding for every infrastructure class, with a routed pool, a
 // one-step graph.v2 formula and a source/step pair owned by a retired session.
 type releasePairCity struct {
-	t         *testing.T
-	dir       string
-	gc        string
-	env       []string
-	source    string
-	step      string
-	root      string
-	finalizer string
-	convoy    string
-	session   string
-	owner     string
+	t           *testing.T
+	dir         string
+	gc          string
+	env         []string
+	source      string
+	step        string
+	root        string
+	finalizer   string
+	convoy      string
+	session     string
+	owner       string
+	rootSession string
 }
 
 const releasePairDeadOwner = "rig/gastown.retired"
@@ -186,7 +187,26 @@ func (c *releasePairCity) releasePair(extra ...string) (string, string, int) {
 	c.t.Helper()
 	args := append([]string{"convoy", "release-pair", c.source, "--step", c.step, "--from", c.owner,
 		"--old-session", c.session, "--handover-id", "h1", "--manifest", filepath.Join(c.dir, "handover.json")}, extra...)
+	if c.rootSession != "" {
+		args = append(args, "--root-session", c.rootSession)
+	}
 	return c.exec(args...)
+}
+
+func (c *releasePairCity) historicalRoot() string {
+	c.t.Helper()
+	session, err := c.sessionStore().Create(beads.Bead{
+		Title: "original developer", Type: "session", Labels: []string{"gc:session"},
+		Metadata: map[string]string{"alias": "rig/gastown.developer", "session_name": "pool-developer"},
+	})
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	if err := c.sessionStore().Close(session.ID); err != nil {
+		c.t.Fatal(err)
+	}
+	c.run("bd", "update", c.root, "--set-metadata", "gc.session_name=pool-developer")
+	return session.ID
 }
 
 func (c *releasePairCity) hookClaim() (string, int) {
@@ -274,20 +294,23 @@ func TestReleasePairRefusesLiveReplacementIdentity(t *testing.T) {
 
 // The staged source-only release cannot be claimed until the step is released.
 func TestReleasePairStagedHandoverOnSplitStores(t *testing.T) {
-	for _, sessionID := range []bool{false, true} {
-		t.Run(fmt.Sprintf("session_id=%t", sessionID), func(t *testing.T) {
-			testReleasePairStagedHandover(t, sessionID)
+	for _, mode := range []string{"alias", "session_id", "historical_root"} {
+		t.Run(mode, func(t *testing.T) {
+			testReleasePairStagedHandover(t, mode)
 		})
 	}
 }
 
-func testReleasePairStagedHandover(t *testing.T, sessionID bool) {
+func testReleasePairStagedHandover(t *testing.T, mode string) {
 	t.Helper()
 	c := newReleasePairCity(t, "delivery:demo")
-	if sessionID {
+	if mode != "alias" {
 		c.owner = c.session
 		c.run("bd", "update", c.source, "--assignee", c.owner)
 		c.run("bd", "update", c.step, "--assignee", c.owner)
+	}
+	if mode == "historical_root" {
+		c.rootSession = c.historicalRoot()
 	}
 
 	out, errOut, code := c.releasePair("--json")
@@ -352,6 +375,55 @@ func testReleasePairStagedHandover(t *testing.T, sessionID bool) {
 	}
 	if after := c.show(c.step); after.Assignee != before.Assignee || after.Status != before.Status {
 		t.Fatalf("repeat changed the claimed step: %+v -> %+v", before, after)
+	}
+}
+
+func TestReleasePairHistoricalRootGuards(t *testing.T) {
+	for _, mode := range []string{"unspecified", "live", "mismatch", "reopened", "resume_option", "live_name"} {
+		t.Run(mode, func(t *testing.T) {
+			c := newReleasePairCity(t)
+			c.rootSession = c.historicalRoot()
+			want := "not the retired"
+			switch mode {
+			case "unspecified":
+				c.rootSession = ""
+			case "live":
+				if err := c.sessionStore().Reopen(c.rootSession); err != nil {
+					t.Fatal(err)
+				}
+				want = "is not closed"
+			case "mismatch":
+				c.rootSession = c.session
+			case "reopened", "resume_option":
+				if _, errOut, code := c.releasePair("--apply", "--stop-after", "prepare-root"); code != 0 {
+					t.Fatalf("prepare root: %s", errOut)
+				}
+				if mode == "reopened" {
+					if err := c.sessionStore().Reopen(c.rootSession); err != nil {
+						t.Fatal(err)
+					}
+					want = "is not closed"
+				} else {
+					c.rootSession = ""
+					want = "different handover"
+				}
+			case "live_name":
+				_, err := c.sessionStore().Create(beads.Bead{Title: "reused runtime", Type: "session", Labels: []string{"gc:session"}, Metadata: map[string]string{"session_name": "pool-developer"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = "still uses root session name"
+			}
+			before := c.show(c.source)
+			_, errOut, code := c.releasePair("--apply")
+			if code != 1 || !strings.Contains(errOut, want) {
+				t.Fatalf("expected %q, got exit %d: %s", want, code, errOut)
+			}
+			after := c.show(c.source)
+			if after.Assignee != before.Assignee || after.Status != before.Status {
+				t.Fatalf("refusal changed source: %+v -> %+v", before, after)
+			}
+		})
 	}
 }
 

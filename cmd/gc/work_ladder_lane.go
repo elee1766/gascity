@@ -820,8 +820,8 @@ func (p *ladderPass) recycle(row beads.Bead, gen int64) {
 func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64) bool {
 	info := sessionInfoFromBead(row)
 	scope := releaseScope(info, p.cfg)
-	hits, err := seatWorkFor(p.env.WorkLegs, scope).match(seatWorkQuery{scope: scope, statuses: startedOnly}, false)
-	hits = slices.DeleteFunc(hits, func(h seatWorkHit) bool { return h.bead.ID != key.Bead })
+	seatHits, err := seatWorkFor(p.env.WorkLegs, scope).match(seatWorkQuery{scope: scope, statuses: startedOnly}, false)
+	hits := slices.DeleteFunc(slices.Clone(seatHits), func(h seatWorkHit) bool { return h.bead.ID != key.Bead })
 	var outcome, why string
 	switch {
 	case err != nil:
@@ -835,6 +835,10 @@ func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64)
 	case strings.TrimSpace(hits[0].bead.Metadata[beadmeta.SessionIDMetadataKey]) == strings.TrimSpace(row.ID):
 		// The live read of gc.session_id, which commit's CAS takes from the
 		// snapshot: the guard for a claim the hook stamped after it was read.
+		outcome = "started"
+	case p.pairedWithHeldClaim(seatHits, hits[0]):
+		// The seat works a source through its workflow step: either half's
+		// progress is the pair's, so releasing one hands live work to another seat.
 		outcome = "started"
 	default:
 		out := releaseListed(hits, releaseLadder, releaseSeatOfInfo(info), p.cfg, ReleaseOpts{})
@@ -868,6 +872,30 @@ func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64)
 		}
 	})
 	return outcome == "released"
+}
+
+// pairedWithHeldClaim reports whether target and another of the seat's
+// in_progress claims are a source and the workflow step it feeds, in either
+// order. A read that fails counts as paired: uncertainty is not permission
+// to release.
+func (p *ladderPass) pairedWithHeldClaim(seatHits []seatWorkHit, target seatWorkHit) bool {
+	for _, h := range seatHits {
+		if h.bead.ID == target.bead.ID || h.store == nil {
+			continue
+		}
+		held, err := stepTracksSource(p.env.WorkLegs.work, p.env.WorkLegs.rigs, h.store, h.bead, target.bead.ID)
+		if err != nil || held {
+			return true
+		}
+		if target.store == nil {
+			continue
+		}
+		held, err = stepTracksSource(p.env.WorkLegs.work, p.env.WorkLegs.rigs, target.store, target.bead, h.bead.ID)
+		if err != nil || held {
+			return true
+		}
+	}
+	return false
 }
 
 // claimGone reports, from a live read, that bead is no longer an

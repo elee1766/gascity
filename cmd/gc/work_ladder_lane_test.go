@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -1618,6 +1619,44 @@ func TestWorkLadderWakesAnIdleSeatForRoutedDemand(t *testing.T) {
 			}
 			if got := c.sp.CountCalls("Nudge", ladderSeatName); got != 0 {
 				t.Fatalf("unusable seat received %d nudges", got)
+			}
+		})
+	}
+}
+
+// A source and the workflow step it feeds are one unit of work: the agent
+// marks one of them, so the ladder must not release either half to another
+// seat while the seat holds the other.
+func TestWorkLadderKeepsASourceAndItsStepTogether(t *testing.T) {
+	for _, current := range []string{"step", "source"} {
+		t.Run("current claim is the "+current, func(t *testing.T) {
+			c := newLadderCity(t)
+			source := c.claim("source")
+			conv, err := c.work.Create(beads.Bead{Title: "input convoy", Type: "convoy"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := convoy.TrackItem(c.work, conv.ID, source, c.work); err != nil {
+				t.Fatal(err)
+			}
+			root, err := c.work.Create(beads.Bead{Title: "workflow", Type: "task", Metadata: map[string]string{beadmeta.InputConvoyIDMetadataKey: conv.ID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			step := c.claim("step")
+			if err := c.work.Update(step, beads.UpdateOpts{Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}}); err != nil {
+				t.Fatal(err)
+			}
+			held := map[string]string{"step": step, "source": source}[current]
+			c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: held})
+			c.run(30*time.Minute, 30*time.Second, nil)
+			for _, id := range []string{source, step} {
+				if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
+					t.Fatalf("%s %q assignee %q, want kept on the seat", id, b.Status, b.Assignee)
+				}
+			}
+			if rel := c.events(events.WorkReleased); len(rel) != 0 {
+				t.Fatalf("work.released = %+v, want none", rel)
 			}
 		})
 	}

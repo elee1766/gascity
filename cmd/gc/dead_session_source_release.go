@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -83,6 +84,41 @@ func releaseDeadOwnerSourceClaims(cityStore beads.Store, rigStores map[string]be
 		}
 	}
 	return released
+}
+
+// stepTracksSource reports whether sourceID is a member of the input convoy
+// of step's workflow. A bead outside any workflow tracks nothing.
+func stepTracksSource(cityStore beads.Store, rigStores map[string]beads.Store, stepStore beads.Store, step beads.Bead, sourceID string) (bool, error) {
+	root := step
+	if strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey]) == "" {
+		rootID := strings.TrimSpace(step.Metadata[beadmeta.RootBeadIDMetadataKey])
+		if rootID == "" || rootID == step.ID {
+			return false, nil
+		}
+		var err error
+		if root, err = stepStore.Get(rootID); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return false, nil
+			}
+			return false, err
+		}
+	}
+	convoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
+	if convoyID == "" {
+		return false, nil
+	}
+	if convoyID == sourceID {
+		return true, nil
+	}
+	sourceStore := sourceStoreForRoot(cityStore, rigStores, stepStore, root)
+	if sourceStore == nil {
+		return false, nil
+	}
+	members, err := convoy.Members(sourceStore, convoyID, false, sourceStore)
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(members, func(m beads.Bead) bool { return m.ID == sourceID }), nil
 }
 
 // sourceStoreForRoot is the store holding the workflow's input convoy and

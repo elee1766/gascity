@@ -883,14 +883,14 @@ func (p *ladderPass) pairedWithHeldClaim(seatHits []seatWorkHit, target seatWork
 		if h.bead.ID == target.bead.ID || h.store == nil {
 			continue
 		}
-		held, err := stepTracksSource(p.env.WorkLegs.work, p.env.WorkLegs.rigs, h.store, h.bead, target.bead.ID)
+		held, err := stepTracksSource(p.env.WorkLegs.workStore(), p.env.WorkLegs.rigs, h.store, h.bead, target.bead.ID)
 		if err != nil || held {
 			return true
 		}
 		if target.store == nil {
 			continue
 		}
-		held, err = stepTracksSource(p.env.WorkLegs.work, p.env.WorkLegs.rigs, target.store, target.bead, h.bead.ID)
+		held, err = stepTracksSource(p.env.WorkLegs.workStore(), p.env.WorkLegs.rigs, target.store, target.bead, h.bead.ID)
 		if err != nil || held {
 			return true
 		}

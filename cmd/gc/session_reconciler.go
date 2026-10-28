@@ -2986,7 +2986,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// seat (O5, revised): its agent is gone, the claims stay on the
 						// closed row, and the cascade alerts. A claim a lane serves (one
 						// moved, or detached and alive) still blocks.
-						if !closed && onlyStrandedWork(sw, infoByID[id]) {
+						if !closed && onlyStrandedWork(sw, infoByID[id], releaseOrphan) {
 							closed = closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing}, clk.Now().UTC(), stderr)
 						}
 					}

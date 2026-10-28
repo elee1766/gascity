@@ -89,7 +89,7 @@ func strandedOnlyProbe(_ context.Context, r effectReads, v txView) (bool, error)
 		return false, nil
 	}
 	scope := releaseScope(v.Row, v.World.Env.Cfg)
-	return onlyStrandedWork(seatWorkFor(r.legs, scope), v.Row), nil
+	return onlyStrandedWork(seatWorkFor(r.legs, scope), v.Row, releaseOrphan), nil
 }
 
 // redecideClose is A21 decided again on the fresh row and runtime read:
@@ -378,7 +378,7 @@ func closeWorthRunning(a aroundCaps) bool {
 		return !started && slices.ContainsFunc(hits, func(h seatWorkHit) bool { return direct(h.bead, seat.fallback) })
 	case c.Kind == closeOrphan && c.Orphaned:
 		return slices.ContainsFunc(hits, func(h seatWorkHit) bool { return direct(h.bead, "") }) ||
-			onlyStrandedWork(seatWorkFor(a.reads.legs, scope), c.Row)
+			onlyStrandedWork(seatWorkFor(a.reads.legs, scope), c.Row, releaseOrphan)
 	case c.Kind == closePoolSlot:
 		return c.Repair || strings.TrimSpace(c.Row.StrandedEventEmittedAt) == ""
 	}

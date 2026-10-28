@@ -350,6 +350,40 @@ func closeEffectCases(t *testing.T, bare bool) {
 			t.Fatalf("claim assignee %q, want released", got.Assignee)
 		}
 	})
+	t.Run("an orphan closes after releasing a mixed routed and plain claim set", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			meta map[string]string
+		}{
+			{"seat fallback", nil},
+			{"run target", map[string]string{beadmeta.RunTargetMetadataKey: "worker"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				c := mk(t, livenessGone, desireDrain, "state", "asleep", "sleep_reason", "runtime-missing")
+				c.entry().DrainReason = drainOrphaned
+				served := c.work(t, "in_progress", routedClaim())
+				plain := c.work(t, "in_progress", tc.meta)
+				s := c.run(t, gone().tmux())
+				if s.Outcome != settledLanded || !s.Closed || c.row(t).Status != "closed" {
+					t.Fatalf("settlement %+v row %s, want closed after served release", s, c.row(t).Status)
+				}
+				if got, _ := c.store.Get(served.ID); got.Assignee != "" {
+					t.Fatalf("served assignee %q, want released", got.Assignee)
+				}
+				got, err := c.store.Get(plain.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if bare {
+					if got.Assignee != c.k.ID {
+						t.Fatalf("plain assignee %q, want kept until cascade", got.Assignee)
+					}
+				} else if got.Assignee != "" || got.Status != "open" || got.Metadata[beadmeta.RunTargetMetadataKey] != "worker" {
+					t.Fatalf("plain claim %+v, want released with recoverable worker route", got)
+				}
+			})
+		}
+	})
 	t.Run("an orphaned orphan closes over a claim no lane serves, keeping it (O5)", func(t *testing.T) {
 		c := mk(t, livenessGone, desireDrain, "state", "asleep")
 		c.entry().DrainReason = drainOrphaned
@@ -674,13 +708,28 @@ func TestCloseEffectEdges(t *testing.T) {
 			t.Fatalf("settlement %+v, want the marker stamped", s)
 		}
 	})
-	t.Run("an orphan whose served claim the release keeps does not close", func(t *testing.T) {
-		installFakeTmux(t, "exit 0") // the claim's detached probe is alive
-		c := orphan(t)
-		claim := c.work(t, "in_progress", detachedClaim())
-		s := c.run(t, gone().tmux())
-		if got, _ := c.store.Get(claim.ID); c.row(t).Status == "closed" || got.Assignee != c.k.ID {
-			t.Fatalf("settlement %+v row %s claim assignee %q, want the row open and the claim kept", s, c.row(t).Status, got.Assignee)
+	t.Run("an orphan keeps claims with a live or unknown detached runtime", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, probe string
+			plain       bool
+		}{
+			{"routed alive", "exit 0", false},
+			{"plain alive", "exit 0", true},
+			{"plain unknown", "exit 2", true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				installFakeTmux(t, tc.probe)
+				c := orphan(t)
+				meta := detachedClaim()
+				if tc.plain {
+					delete(meta, beadmeta.RoutedToMetadataKey)
+				}
+				claim := c.work(t, "in_progress", meta)
+				s := c.run(t, gone().tmux())
+				if got, _ := c.store.Get(claim.ID); c.row(t).Status == "closed" || got.Assignee != c.k.ID {
+					t.Fatalf("settlement %+v row %s claim assignee %q, want the row open and the claim kept", s, c.row(t).Status, got.Assignee)
+				}
+			})
 		}
 	})
 	t.Run("the cascade releases nothing on a row open again", func(t *testing.T) {

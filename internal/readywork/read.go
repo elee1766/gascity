@@ -2,6 +2,7 @@ package readywork
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -277,8 +278,9 @@ func merge(results []legResult) ([]beads.Bead, map[string]int) {
 // replaces resolves blockers with `bd show` in the agent's work directory, which
 // on a split city resolves nothing for a relocated id and, failing open, serves
 // the candidate as unblocked: correct for a resume, but it re-serves a
-// gate-blocked step on every tick. A relocated step's blockers live in the same
-// store the step does, so the leg that answered is the leg that can answer this.
+// gate-blocked step on every tick. Read edges from the serving leg, resolving
+// cross-rig work targets in the other work legs without crossing coordination
+// class boundaries.
 //
 // The reads run concurrently: the legs, each leg's rows, and each leg's distinct
 // blocking targets. Each row is answered exactly as the per-row walk answered
@@ -308,7 +310,7 @@ func blockedByForRows(ctx context.Context, items []beads.Bead, legs []Leg, owner
 	perLeg := make([]legBlockers, len(legOrder))
 	fanout.Bounded(len(legOrder), LegFanOut, func(i int) {
 		idx := legOrder[i]
-		perLeg[i] = readLegBlockers(ctx, legs[idx], byLeg[idx])
+		perLeg[i] = readLegBlockers(ctx, legs, idx, byLeg[idx])
 	})
 	// Report the failure of the first row, in answer order, whose enrichment
 	// failed: the row the sequential walk would have stopped at.
@@ -347,7 +349,8 @@ type legBlockers struct {
 // used, so every row's blockers come back in the order that read returns them;
 // the rows and then the distinct blocking targets are read concurrently, at most
 // LegFanOut at a time.
-func readLegBlockers(ctx context.Context, leg Leg, ids []string) legBlockers {
+func readLegBlockers(ctx context.Context, legs []Leg, owner int, ids []string) legBlockers {
+	leg := legs[owner]
 	out := legBlockers{blockers: make(map[string][]ReadyBeadBlocker, len(ids)), errs: make(map[string]error)}
 	live := beads.HandlesFor(leg.Store).Live
 	deps := make([][]beads.Dep, len(ids))
@@ -383,7 +386,7 @@ func readLegBlockers(ctx context.Context, leg Leg, ids []string) legBlockers {
 		if getErrs[i] = ctx.Err(); getErrs[i] != nil {
 			return
 		}
-		got[i], getErrs[i] = live.Get(targets[i])
+		got[i], getErrs[i] = readBlockingTarget(ctx, legs, owner, targets[i])
 	})
 	for i, id := range ids {
 		if depErrs[i] != nil {
@@ -396,10 +399,7 @@ func readLegBlockers(ctx context.Context, leg Leg, ids []string) legBlockers {
 			}
 			t := byTarget[dep.DependsOnID]
 			if getErrs[t] != nil {
-				// A blocking edge whose target this leg cannot resolve is a
-				// cross-store dependency, which the split topology forbids (strict
-				// residence), so it is a real fault, not an absence: treating it as
-				// "no blocker" would serve a gated bead.
+				// An unresolved blocking edge remains a fault, never an absent gate.
 				out.errs[id] = fmt.Errorf("%s store: resolving blocker %q of %q: %w", leg.Label, dep.DependsOnID, id, getErrs[t])
 				blockers = nil
 				break
@@ -411,4 +411,29 @@ func readLegBlockers(ctx context.Context, leg Leg, ids []string) legBlockers {
 		}
 	}
 	return out
+}
+
+// Work dependencies may cross rigs; coordination-class dependencies stay local.
+func readBlockingTarget(ctx context.Context, legs []Leg, owner int, id string) (beads.Bead, error) {
+	leg := legs[owner]
+	row, err := beads.HandlesFor(leg.Store).Live.Get(id)
+	if err == nil || !errors.Is(err, beads.ErrNotFound) || leg.ClassBinding {
+		return row, err
+	}
+	for i, other := range legs {
+		if i == owner || other.Store == nil || other.ClassBinding {
+			continue
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return beads.Bead{}, ctxErr
+		}
+		candidate, candidateErr := beads.HandlesFor(other.Store).Live.Get(id)
+		if candidateErr == nil {
+			return candidate, nil
+		}
+		if !errors.Is(candidateErr, beads.ErrNotFound) {
+			return beads.Bead{}, fmt.Errorf("%s store: %w", other.Label, candidateErr)
+		}
+	}
+	return row, err
 }

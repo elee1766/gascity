@@ -186,3 +186,61 @@ func TestInProgressEnrichmentFailureNamesTheRowAndBlocker(t *testing.T) {
 		t.Fatalf("error = %v, want it to contain %q", err, want)
 	}
 }
+
+func TestInProgressEnrichmentResolvesCrossRigSQLiteBlocker(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		sourceClass, targetClass bool
+	}{
+		{name: "cross_rig_work"},
+		{name: "class_source", sourceClass: true},
+		{name: "class_target", targetClass: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			account, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("acc"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = account.(*beads.SQLiteStore).CloseStore() })
+			retail, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("ret"),
+				beads.WithSQLiteDependencyResolver(func(_ context.Context, id string) (beads.Bead, error) {
+					return account.Get(id)
+				}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = retail.(*beads.SQLiteStore).CloseStore() })
+			blocker := mustCreate(t, account, beads.Bead{Title: "backend prerequisite", Type: "task"})
+			row := mustCreate(t, retail, beads.Bead{Title: "frontend work", Type: "task", Assignee: "worker"})
+			status := StatusInProgress
+			if err := retail.Update(row.ID, beads.UpdateOpts{Status: &status}); err != nil {
+				t.Fatal(err)
+			}
+			if err := retail.DepAdd(row.ID, blocker.ID, "blocks"); err != nil {
+				t.Fatal(err)
+			}
+			legs := []Leg{testLeg("retail", retail), testLeg("account", account)}
+			legs[0].ClassBinding = tc.sourceClass
+			legs[1].ClassBinding = tc.targetClass
+			for _, blockerStatus := range []string{"open", "closed", "open"} {
+				if err := account.Update(blocker.ID, beads.UpdateOpts{Status: &blockerStatus}); err != nil {
+					t.Fatal(err)
+				}
+				rows, err := Read(legs, Query{Assignee: "worker", Status: StatusInProgress})
+				if tc.sourceClass || tc.targetClass {
+					if err == nil {
+						t.Fatal("coordination-class dependency escaped its owning store")
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("read cross-rig blocker in %s state: %v", blockerStatus, err)
+				}
+				want := []ReadyBeadBlocker{{ID: blocker.ID, Status: blockerStatus}}
+				if len(rows) != 1 || rows[0].ID != row.ID || !reflect.DeepEqual(rows[0].BlockedBy, want) {
+					t.Fatalf("rows = %+v, want frontend with blockers %+v", rows, want)
+				}
+			}
+		})
+	}
+}

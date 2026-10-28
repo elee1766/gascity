@@ -55,6 +55,8 @@ type releasePairOptions struct {
 	StopAfter  string
 	Apply      bool
 	JSON       bool
+
+	RootSession string
 }
 
 type releasePairSnap struct {
@@ -100,6 +102,8 @@ type releasePairManifest struct {
 	Inventory  releasePairInventory       `json:"inventory"`
 	Completed  []string                   `json:"completed"`
 	Pending    *releasePairPending        `json:"pending,omitempty"`
+
+	RootSession string `json:"root_session,omitempty"`
 }
 
 type releasePairResult struct {
@@ -137,6 +141,11 @@ preflight snapshot, refusing on any drift. Reference inventory includes all
 configured work scopes and class bindings. An unavailable, suspended or
 possibly truncated scope refuses the handover rather than being skipped.
 
+If a completed developer-to-refinery handoff left the root bound to a
+separate retired developer, name that exact closed session with --root-session.
+It must match the root binding and remain closed throughout the handover.
+This does not change the required owner of the source and execution step.
+
 Holds present before the run are kept unless named with --clear-hold.
 Progress is persisted to a manifest so an interrupted run resumes from the
 last verified phase, and a write whose outcome cannot be proven exits 2 for
@@ -157,6 +166,7 @@ naming the not-yet-released pairs as siblings.`,
 	cmd.Flags().StringVar(&opts.Step, "step", "", "Execution step bead owned by the same dead owner (required)")
 	cmd.Flags().StringVar(&opts.From, "from", "", "Assignee recorded on both source and step (required)")
 	cmd.Flags().StringVar(&opts.OldSession, "old-session", "", "Closed session bead that held the pair (required)")
+	cmd.Flags().StringVar(&opts.RootSession, "root-session", "", "Explicit closed historical session bound to the workflow root, if different from --old-session")
 	cmd.Flags().StringVar(&opts.HandoverID, "handover-id", "", "Stable handover identifier (default pair-<source>-<step>)")
 	cmd.Flags().StringVar(&opts.Manifest, "manifest", "", "Manifest path (default <city>/.gc/handovers/<handover-id>.json)")
 	cmd.Flags().StringSliceVar(&opts.ClearHolds, "clear-hold", nil, "Pre-existing hold label the operator is authorized to clear (repeatable)")
@@ -184,6 +194,7 @@ func cmdConvoyReleasePair(opts releasePairOptions, stdout, stderr io.Writer) int
 	opts.Step = strings.TrimSpace(opts.Step)
 	opts.From = strings.TrimSpace(opts.From)
 	opts.OldSession = strings.TrimSpace(opts.OldSession)
+	opts.RootSession = strings.TrimSpace(opts.RootSession)
 	if opts.Source == "" || opts.Step == "" || opts.From == "" || opts.OldSession == "" {
 		return fail(1, "source, --step, --from and --old-session are required")
 	}
@@ -327,7 +338,7 @@ func (r *releasePairRun) result(m *releasePairManifest, outcome, detail string) 
 }
 
 func (r *releasePairRun) matchesManifest(m *releasePairManifest) error {
-	if m.HandoverID != r.opts.HandoverID || m.Source != r.opts.Source || m.Step != r.opts.Step || m.From != r.opts.From || m.OldSession != r.opts.OldSession {
+	if m.HandoverID != r.opts.HandoverID || m.Source != r.opts.Source || m.Step != r.opts.Step || m.From != r.opts.From || m.OldSession != r.opts.OldSession || m.RootSession != r.opts.RootSession {
 		return fmt.Errorf("manifest %s records a different handover; inspect it instead of reusing it", r.opts.Manifest)
 	}
 	if !slices.Equal(sortedStrings(m.Siblings), sortedStrings(r.opts.Siblings)) {
@@ -408,7 +419,7 @@ func (r *releasePairRun) preflight() (*releasePairManifest, error) {
 	if !session.Closed {
 		return nil, fmt.Errorf("old session %s is not closed", o.OldSession)
 	}
-	if session.Alias != o.From && session.AgentName != o.From {
+	if session.ID != o.From && session.Alias != o.From && session.AgentName != o.From {
 		return nil, fmt.Errorf("old session %s belongs to %q, not %q", o.OldSession, firstNonEmpty(session.Alias, session.AgentName), o.From)
 	}
 	for _, b := range []beads.Bead{source, step} {
@@ -434,8 +445,17 @@ func (r *releasePairRun) preflight() (*releasePairManifest, error) {
 	if root.Status == "closed" || convoyBead.Status == "closed" {
 		return nil, fmt.Errorf("root %s or convoy %s is closed", root.ID, convoyBead.ID)
 	}
-	if err := releasePairSessionRefsStale(root, o.OldSession, session.SessionName); err != nil {
-		return nil, err
+	if o.RootSession == "" {
+		if err := releasePairSessionRefsStale(root, o.OldSession, session.SessionName); err != nil {
+			return nil, err
+		}
+	} else {
+		if root.Metadata[beadmeta.SessionIDMetadataKey] == "" && root.Metadata[beadmeta.SessionNameMetadataKey] == "" {
+			return nil, fmt.Errorf("root %s has no session binding for --root-session", root.ID)
+		}
+		if err := r.checkRootSession(root, o.RootSession); err != nil {
+			return nil, err
+		}
 	}
 	if src := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey]); src != "" && src != source.ID {
 		return nil, fmt.Errorf("root %s is sourced from %s, not %s", root.ID, src, source.ID)
@@ -487,6 +507,8 @@ func (r *releasePairRun) preflight() (*releasePairManifest, error) {
 		Expected:   map[string]releasePairSnap{},
 		FenceAdded: map[string]bool{},
 		Completed:  []string{},
+
+		RootSession: o.RootSession,
 	}
 	for _, id := range m.ids() {
 		_, b, err := r.resolve(id)
@@ -569,6 +591,30 @@ func (r *releasePairRun) verifySiblings(m *releasePairManifest, oldSessionName s
 		allowed[src.ID], allowed[step.ID] = true, true
 	}
 	return allowed, nil
+}
+
+// checkRootSession permits only the explicitly named, still-closed root binding.
+func (r *releasePairRun) checkRootSession(root beads.Bead, id string) error {
+	session, err := r.sessions.Get(id)
+	if err != nil {
+		return fmt.Errorf("reading root session %s: %w", id, err)
+	}
+	if !session.Closed {
+		return fmt.Errorf("root session %s is not closed", id)
+	}
+	if err := releasePairSessionRefsStale(root, id, session.SessionName); err != nil {
+		return err
+	}
+	current, err := r.sessions.List("", "")
+	if err != nil {
+		return fmt.Errorf("checking root replacement sessions: %w", err)
+	}
+	for _, candidate := range current {
+		if candidate.ID == id || (session.SessionName != "" && candidate.SessionName == session.SessionName) {
+			return fmt.Errorf("open session %s still uses root session name %q", candidate.ID, session.SessionName)
+		}
+	}
+	return nil
 }
 
 // releasePairSessionRefsStale refuses a record bound to any session other than
@@ -749,6 +795,15 @@ func (r *releasePairRun) check(m *releasePairManifest) error {
 	}
 	if !session.Closed {
 		return fmt.Errorf("old session %s is no longer closed", m.OldSession)
+	}
+	if m.RootSession != "" {
+		root, err := r.stores[m.Root].Get(m.Root)
+		if err != nil {
+			return fmt.Errorf("re-reading root %s: %w", m.Root, err)
+		}
+		if err := r.checkRootSession(root, m.RootSession); err != nil {
+			return err
+		}
 	}
 	return nil
 }

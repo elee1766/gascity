@@ -30,6 +30,7 @@ type releasePairCity struct {
 	finalizer string
 	convoy    string
 	session   string
+	owner     string
 }
 
 const releasePairDeadOwner = "rig/gastown.retired"
@@ -76,7 +77,7 @@ name = "control-dispatcher"
 	if err := os.WriteFile(filepath.Join(dir, "formulas", "pair.toml"), []byte(formula), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c := &releasePairCity{t: t, dir: dir, gc: reexecGCTestBinaryForTests(t)}
+	c := &releasePairCity{t: t, dir: dir, gc: reexecGCTestBinaryForTests(t), owner: releasePairDeadOwner}
 	c.env = append(os.Environ(),
 		"HOME="+filepath.Join(dir, "home"), "GC_CITY="+dir, "GC_HOME="+filepath.Join(dir, "supervisor"),
 		"GC_BEADS=sqlite-work", "GC_NO_API=1", "GC_ISOLATED=1", "GC_AGENT=worker", "GC_ALIAS=worker",
@@ -183,7 +184,7 @@ func (c *releasePairCity) show(id string) releasePairRow {
 
 func (c *releasePairCity) releasePair(extra ...string) (string, string, int) {
 	c.t.Helper()
-	args := append([]string{"convoy", "release-pair", c.source, "--step", c.step, "--from", releasePairDeadOwner,
+	args := append([]string{"convoy", "release-pair", c.source, "--step", c.step, "--from", c.owner,
 		"--old-session", c.session, "--handover-id", "h1", "--manifest", filepath.Join(c.dir, "handover.json")}, extra...)
 	return c.exec(args...)
 }
@@ -273,7 +274,21 @@ func TestReleasePairRefusesLiveReplacementIdentity(t *testing.T) {
 
 // The staged source-only release cannot be claimed until the step is released.
 func TestReleasePairStagedHandoverOnSplitStores(t *testing.T) {
+	for _, sessionID := range []bool{false, true} {
+		t.Run(fmt.Sprintf("session_id=%t", sessionID), func(t *testing.T) {
+			testReleasePairStagedHandover(t, sessionID)
+		})
+	}
+}
+
+func testReleasePairStagedHandover(t *testing.T, sessionID bool) {
+	t.Helper()
 	c := newReleasePairCity(t, "delivery:demo")
+	if sessionID {
+		c.owner = c.session
+		c.run("bd", "update", c.source, "--assignee", c.owner)
+		c.run("bd", "update", c.step, "--assignee", c.owner)
+	}
 
 	out, errOut, code := c.releasePair("--json")
 	if code != 0 {
@@ -289,7 +304,7 @@ func TestReleasePairStagedHandoverOnSplitStores(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &result); err != nil || result.Result != "preflight-verified" || result.SchemaVersion != "1" || !result.OK || result.Command != "convoy.release-pair" || result.Action != "release-pair" {
 		t.Fatalf("JSON dry run result: %s (%v)", out, err)
 	}
-	if row := c.show(c.source); row.Assignee != releasePairDeadOwner || row.Status != "blocked" {
+	if row := c.show(c.source); row.Assignee != c.owner || row.Status != "blocked" {
 		t.Fatalf("dry run mutated the source: %+v", row)
 	}
 	if _, err := os.Stat(filepath.Join(c.dir, "handover.json")); !os.IsNotExist(err) {

@@ -408,7 +408,7 @@ func (r *releasePairRun) preflight() (*releasePairManifest, error) {
 	if !session.Closed {
 		return nil, fmt.Errorf("old session %s is not closed", o.OldSession)
 	}
-	if session.Alias != o.From && session.AgentName != o.From {
+	if session.ID != o.From && session.Alias != o.From && session.AgentName != o.From {
 		return nil, fmt.Errorf("old session %s belongs to %q, not %q", o.OldSession, firstNonEmpty(session.Alias, session.AgentName), o.From)
 	}
 	for _, b := range []beads.Bead{source, step} {

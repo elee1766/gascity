@@ -57,6 +57,7 @@ type releasePairOptions struct {
 	JSON       bool
 
 	RootSession string
+	StepSession string
 }
 
 type releasePairSnap struct {
@@ -104,6 +105,7 @@ type releasePairManifest struct {
 	Pending    *releasePairPending        `json:"pending,omitempty"`
 
 	RootSession string `json:"root_session,omitempty"`
+	StepSession string `json:"step_session,omitempty"`
 }
 
 type releasePairResult struct {
@@ -146,6 +148,11 @@ separate retired developer, name that exact closed session with --root-session.
 It must match the root binding and remain closed throughout the handover.
 This does not change the required owner of the source and execution step.
 
+If the source and step name different closed incarnations of the same owner,
+name the step's exact session with --step-session. It must carry the same
+recorded alias or configured named identity as --from, match the step binding,
+and remain closed. A live replacement owner still refuses the handover.
+
 Holds present before the run are kept unless named with --clear-hold.
 Progress is persisted to a manifest so an interrupted run resumes from the
 last verified phase, and a write whose outcome cannot be proven exits 2 for
@@ -167,6 +174,7 @@ naming the not-yet-released pairs as siblings.`,
 	cmd.Flags().StringVar(&opts.From, "from", "", "Assignee recorded on both source and step (required)")
 	cmd.Flags().StringVar(&opts.OldSession, "old-session", "", "Closed session bead that held the pair (required)")
 	cmd.Flags().StringVar(&opts.RootSession, "root-session", "", "Explicit closed historical session bound to the workflow root, if different from --old-session")
+	cmd.Flags().StringVar(&opts.StepSession, "step-session", "", "Explicit closed session bound to the step with the same named owner as --from")
 	cmd.Flags().StringVar(&opts.HandoverID, "handover-id", "", "Stable handover identifier (default pair-<source>-<step>)")
 	cmd.Flags().StringVar(&opts.Manifest, "manifest", "", "Manifest path (default <city>/.gc/handovers/<handover-id>.json)")
 	cmd.Flags().StringSliceVar(&opts.ClearHolds, "clear-hold", nil, "Pre-existing hold label the operator is authorized to clear (repeatable)")
@@ -195,6 +203,7 @@ func cmdConvoyReleasePair(opts releasePairOptions, stdout, stderr io.Writer) int
 	opts.From = strings.TrimSpace(opts.From)
 	opts.OldSession = strings.TrimSpace(opts.OldSession)
 	opts.RootSession = strings.TrimSpace(opts.RootSession)
+	opts.StepSession = strings.TrimSpace(opts.StepSession)
 	if opts.Source == "" || opts.Step == "" || opts.From == "" || opts.OldSession == "" {
 		return fail(1, "source, --step, --from and --old-session are required")
 	}
@@ -338,7 +347,7 @@ func (r *releasePairRun) result(m *releasePairManifest, outcome, detail string) 
 }
 
 func (r *releasePairRun) matchesManifest(m *releasePairManifest) error {
-	if m.HandoverID != r.opts.HandoverID || m.Source != r.opts.Source || m.Step != r.opts.Step || m.From != r.opts.From || m.OldSession != r.opts.OldSession || m.RootSession != r.opts.RootSession {
+	if m.HandoverID != r.opts.HandoverID || m.Source != r.opts.Source || m.Step != r.opts.Step || m.From != r.opts.From || m.OldSession != r.opts.OldSession || m.RootSession != r.opts.RootSession || m.StepSession != r.opts.StepSession {
 		return fmt.Errorf("manifest %s records a different handover; inspect it instead of reusing it", r.opts.Manifest)
 	}
 	if !slices.Equal(sortedStrings(m.Siblings), sortedStrings(r.opts.Siblings)) {
@@ -429,7 +438,11 @@ func (r *releasePairRun) preflight() (*releasePairManifest, error) {
 		if b.Status != "open" && b.Status != "in_progress" && b.Status != "blocked" {
 			return nil, fmt.Errorf("%s status %q cannot be handed over", b.ID, b.Status)
 		}
-		if err := releasePairSessionRefsStale(b, o.OldSession, session.SessionName); err != nil {
+		if b.ID == step.ID && o.StepSession != "" {
+			if err := r.checkStepSession(b, o.StepSession, o.From); err != nil {
+				return nil, err
+			}
+		} else if err := releasePairSessionRefsStale(b, o.OldSession, session.SessionName); err != nil {
 			return nil, err
 		}
 		if deadline := strings.TrimSpace(b.Metadata[beads.WorkLeaseExpiresMetadataKey]); deadline != "" {
@@ -509,6 +522,7 @@ func (r *releasePairRun) preflight() (*releasePairManifest, error) {
 		Completed:  []string{},
 
 		RootSession: o.RootSession,
+		StepSession: o.StepSession,
 	}
 	for _, id := range m.ids() {
 		_, b, err := r.resolve(id)
@@ -617,6 +631,36 @@ func (r *releasePairRun) checkRootSession(root beads.Bead, id string) error {
 	return nil
 }
 
+// checkStepSession verifies the explicit closed incarnation without accepting another owner.
+func (r *releasePairRun) checkStepSession(step beads.Bead, id, from string) error {
+	session, err := r.sessions.Get(id)
+	if err != nil {
+		return fmt.Errorf("reading step session %s: %w", id, err)
+	}
+	if !session.Closed {
+		return fmt.Errorf("step session %s is not closed", id)
+	}
+	if session.Alias != from && session.ConfiguredNamedIdentity != from {
+		return fmt.Errorf("step session %s does not carry named owner %q", id, from)
+	}
+	if strings.TrimSpace(step.Metadata[beadmeta.SessionIDMetadataKey]) == "" && strings.TrimSpace(step.Metadata[beadmeta.SessionNameMetadataKey]) == "" {
+		return fmt.Errorf("step %s has no session binding for --step-session", step.ID)
+	}
+	if err := releasePairSessionRefsStale(step, id, session.SessionName); err != nil {
+		return err
+	}
+	current, err := r.sessions.List("", "")
+	if err != nil {
+		return fmt.Errorf("checking step replacement sessions: %w", err)
+	}
+	for _, candidate := range current {
+		if candidate.ID == id || (session.SessionName != "" && candidate.SessionName == session.SessionName) {
+			return fmt.Errorf("open session %s still uses step session name %q", candidate.ID, session.SessionName)
+		}
+	}
+	return nil
+}
+
 // releasePairSessionRefsStale refuses a record bound to any session other than
 // the closed one being retired.
 func releasePairSessionRefsStale(b beads.Bead, oldSessionID, oldSessionName string) error {
@@ -656,6 +700,9 @@ func (r *releasePairRun) inventory(m *releasePairManifest) (releasePairInventory
 		}
 	}
 	needles := append(m.ids(), m.OldSession, m.From)
+	if m.StepSession != "" {
+		needles = append(needles, m.StepSession)
+	}
 	own := map[string]bool{}
 	for _, id := range m.ids() {
 		own[id] = true
@@ -731,7 +778,7 @@ func (r *releasePairRun) inventory(m *releasePairManifest) (releasePairInventory
 		if sessionpkg.IsWaitTerminalState(w.State) || w.Status == "closed" {
 			continue
 		}
-		refs := w.SessionID == m.OldSession || slices.ContainsFunc(w.DepIDs, func(dep string) bool { return slices.Contains(needles, dep) })
+		refs := w.SessionID == m.OldSession || (m.StepSession != "" && w.SessionID == m.StepSession) || slices.ContainsFunc(w.DepIDs, func(dep string) bool { return slices.Contains(needles, dep) })
 		if refs {
 			inv.Waits = append(inv.Waits, w.ID)
 		}
@@ -780,6 +827,13 @@ func (r *releasePairRun) check(m *releasePairManifest) error {
 		}
 		if diff := releasePairDiff(m.Expected[id], releasePairSnapOf(b), true); diff != "" {
 			return fmt.Errorf("%s changed since the last verified phase (%s); refusing", id, diff)
+		}
+	}
+	if m.StepSession != "" {
+		// Bind to the original step even after prepare-step clears its session metadata.
+		step := m.Preimage[m.Step]
+		if err := r.checkStepSession(beads.Bead{ID: step.ID, Metadata: step.Metadata}, m.StepSession, m.From); err != nil {
+			return err
 		}
 	}
 	inv, err := r.inventory(m)

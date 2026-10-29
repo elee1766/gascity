@@ -32,6 +32,7 @@ type releasePairCity struct {
 	session     string
 	owner       string
 	rootSession string
+	stepSession string
 }
 
 const releasePairDeadOwner = "rig/gastown.retired"
@@ -190,7 +191,29 @@ func (c *releasePairCity) releasePair(extra ...string) (string, string, int) {
 	if c.rootSession != "" {
 		args = append(args, "--root-session", c.rootSession)
 	}
+	if c.stepSession != "" {
+		args = append(args, "--step-session", c.stepSession)
+	}
 	return c.exec(args...)
+}
+
+func (c *releasePairCity) separateStepSession(alias string) string {
+	c.t.Helper()
+	session, err := c.sessionStore().Create(beads.Bead{
+		Title: "retired step session", Type: "session", Labels: []string{"gc:session"},
+		Metadata: map[string]string{"alias": alias, "session_name": "pool-step-retired"},
+	})
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	if err := c.sessionStore().Close(session.ID); err != nil {
+		c.t.Fatal(err)
+	}
+	c.run("bd", "update", c.source, "--set-metadata", "gc.session_id="+c.session)
+	c.run("bd", "update", c.step, "--set-metadata", "gc.session_id="+session.ID,
+		"--set-metadata", "gc.session_name=pool-step-retired")
+	c.stepSession = session.ID
+	return session.ID
 }
 
 func (c *releasePairCity) historicalRoot() string {
@@ -294,7 +317,7 @@ func TestReleasePairRefusesLiveReplacementIdentity(t *testing.T) {
 
 // The staged source-only release cannot be claimed until the step is released.
 func TestReleasePairStagedHandoverOnSplitStores(t *testing.T) {
-	for _, mode := range []string{"alias", "session_id", "historical_root"} {
+	for _, mode := range []string{"alias", "session_id", "historical_root", "split_session"} {
 		t.Run(mode, func(t *testing.T) {
 			testReleasePairStagedHandover(t, mode)
 		})
@@ -304,13 +327,16 @@ func TestReleasePairStagedHandoverOnSplitStores(t *testing.T) {
 func testReleasePairStagedHandover(t *testing.T, mode string) {
 	t.Helper()
 	c := newReleasePairCity(t, "delivery:demo")
-	if mode != "alias" {
+	if mode == "session_id" || mode == "historical_root" {
 		c.owner = c.session
 		c.run("bd", "update", c.source, "--assignee", c.owner)
 		c.run("bd", "update", c.step, "--assignee", c.owner)
 	}
 	if mode == "historical_root" {
 		c.rootSession = c.historicalRoot()
+	}
+	if mode == "split_session" {
+		c.separateStepSession(c.owner)
 	}
 
 	out, errOut, code := c.releasePair("--json")
@@ -375,6 +401,70 @@ func testReleasePairStagedHandover(t *testing.T, mode string) {
 	}
 	if after := c.show(c.step); after.Assignee != before.Assignee || after.Status != before.Status {
 		t.Fatalf("repeat changed the claimed step: %+v -> %+v", before, after)
+	}
+}
+
+func TestReleasePairSplitSessionGuards(t *testing.T) {
+	for _, mode := range []string{"unspecified", "unbound", "live", "live_owner", "wrong_identity", "wrong_name", "reopened", "resume_option", "new_reference", "live_name"} {
+		t.Run(mode, func(t *testing.T) {
+			c := newReleasePairCity(t)
+			alias := c.owner
+			if mode == "wrong_identity" {
+				alias = "rig/another-owner"
+			}
+			stepSession := c.separateStepSession(alias)
+			want := "step session"
+			switch mode {
+			case "unspecified":
+				c.stepSession = ""
+				want = "is bound to session"
+			case "unbound":
+				c.run("bd", "update", c.step, "--set-metadata", "gc.session_id=", "--set-metadata", "gc.session_name=")
+				want = "has no session binding"
+			case "live_owner":
+				_, err := c.sessionStore().Create(beads.Bead{Title: "live successor", Type: "session", Labels: []string{"gc:session"}, Metadata: map[string]string{"alias": c.owner, "session_name": "pool-successor"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = "still owns"
+			case "live":
+				if err := c.sessionStore().Reopen(stepSession); err != nil {
+					t.Fatal(err)
+				}
+			case "wrong_name":
+				c.run("bd", "update", c.step, "--set-metadata", "gc.session_name=unrelated-runtime")
+				want = "is bound to session name"
+			case "reopened", "resume_option", "new_reference":
+				if _, errOut, code := c.releasePair("--apply", "--stop-after", "prepare-step"); code != 0 {
+					t.Fatalf("prepare step: %s", errOut)
+				}
+				switch mode {
+				case "reopened":
+					if err := c.sessionStore().Reopen(stepSession); err != nil {
+						t.Fatal(err)
+					}
+				case "resume_option":
+					c.stepSession = ""
+					want = "different handover"
+				case "new_reference":
+					c.create("step session reference", "--set-metadata", "gc.session_id="+stepSession)
+					want = "references or waits changed"
+				}
+			case "live_name":
+				_, err := c.sessionStore().Create(beads.Bead{Title: "reused step runtime", Type: "session", Labels: []string{"gc:session"}, Metadata: map[string]string{"session_name": "pool-step-retired"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := c.show(c.source)
+			_, errOut, code := c.releasePair("--apply")
+			if code != 1 || !strings.Contains(errOut, want) {
+				t.Fatalf("expected %q, got exit %d: %s", want, code, errOut)
+			}
+			if after := c.show(c.source); after.Assignee != before.Assignee || after.Status != before.Status {
+				t.Fatalf("refusal changed source: %+v -> %+v", before, after)
+			}
+		})
 	}
 }
 

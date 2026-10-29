@@ -1355,6 +1355,16 @@ preflight snapshot, refusing on any drift. Reference inventory includes all
 configured work scopes and class bindings. An unavailable, suspended or
 possibly truncated scope refuses the handover rather than being skipped.
 
+If a completed developer-to-refinery handoff left the root bound to a
+separate retired developer, name that exact closed session with --root-session.
+It must match the root binding and remain closed throughout the handover.
+This does not change the required owner of the source and execution step.
+
+If the source and step name different closed incarnations of the same owner,
+name the step's exact session with --step-session. It must carry the same
+recorded alias or configured named identity as --from, match the step binding,
+and remain closed. A live replacement owner still refuses the handover.
+
 Holds present before the run are kept unless named with --clear-hold.
 Progress is persisted to a manifest so an interrupted run resumes from the
 last verified phase, and a write whose outcome cannot be proven exits 2 for
@@ -1380,8 +1390,10 @@ gc convoy release-pair <source-bead-id> [flags]
 | `--json` | bool |  | Output JSON |
 | `--manifest` | string |  | Manifest path (default &lt;city&gt;/.gc/handovers/&lt;handover-id&gt;.json) |
 | `--old-session` | string |  | Closed session bead that held the pair (required) |
+| `--root-session` | string |  | Explicit closed historical session bound to the workflow root, if different from --old-session |
 | `--sibling-pair` | stringSlice |  | Other SOURCE:STEP pair held by the same retired owner (repeatable) |
 | `--step` | string |  | Execution step bead owned by the same dead owner (required) |
+| `--step-session` | string |  | Explicit closed session bound to the step with the same named owner as --from |
 | `--stop-after` | string |  | Stop after this phase (fence-step, fence-source, prepare-step, prepare-source, prepare-root, release-source, release-step) |
 
 ## gc convoy reopen-source

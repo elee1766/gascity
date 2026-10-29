@@ -216,7 +216,7 @@ func TestStampRunSessionIdentitySkipsAmbiguousAssignee(t *testing.T) {
 func TestStampRunSessionIdentityReassignmentRestamps(t *testing.T) {
 	run := beads.Bead{
 		ID: "co-run2", Type: "molecule", Status: "in_progress", Assignee: "worker-b",
-		Metadata: map[string]string{"gc.session_name": "worker-a", "gc.work_dir": "/old"},
+		Metadata: map[string]string{"gc.session_id": "sess-worker-b", "gc.session_name": "worker-a", "gc.work_dir": "/old"},
 	}
 	mem := beads.NewMemStoreFrom(0, []beads.Bead{run}, nil)
 	store := &countingStore{Store: mem}
@@ -231,6 +231,38 @@ func TestStampRunSessionIdentityReassignmentRestamps(t *testing.T) {
 	}
 }
 
+func TestStampRunSessionIdentityPreservesExplicitBindings(t *testing.T) {
+	for _, target := range []string{"step", "root"} {
+		t.Run(target, func(t *testing.T) {
+			const current = "worker-b"
+			root := beads.Bead{ID: "root", Type: "molecule", Status: "open"}
+			step := beads.Bead{
+				ID: "step", Type: "step", Status: "in_progress", Assignee: current,
+				Metadata: map[string]string{
+					"gc.root_bead_id": "root", "gc.session_name": current, "gc.work_dir": "/new",
+				},
+			}
+			if target == "step" {
+				step.Metadata["gc.session_id"] = "sess-worker-a"
+				step.Metadata["gc.session_name"] = "worker-a"
+				step.Metadata["gc.work_dir"] = "/old"
+			} else {
+				root.Metadata = map[string]string{
+					"gc.session_id": "sess-worker-a", "gc.session_name": "worker-a", "gc.work_dir": "/old",
+				}
+			}
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+			store := &countingStore{Store: mem}
+			sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(current, "/new")})
+
+			stampRunSessionIdentity(gaConfig(), []beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
+
+			if store.writes != 0 {
+				t.Fatalf("observability stamp changed explicit %s session binding (%d writes)", target, store.writes)
+			}
+		})
+	}
+}
 func TestStampRunSessionIdentitySkipsNonExecuting(t *testing.T) {
 	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession("worker-x", "/wd")})
 
@@ -321,7 +353,7 @@ func TestStampRunRootFromStepPreservesRootEvidenceAgainstPoolSlotCwd(t *testing.
 	mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
 	store := &countingStore{Store: mem}
 
-	stampRunRootFromStep(gaConfig(), store, step, sessionName, poolSlotSelf, true, map[string]struct{}{}, io.Discard)
+	stampRunRootFromStep(gaConfig(), store, step, "sess-"+sessionName, sessionName, poolSlotSelf, true, map[string]struct{}{}, io.Discard)
 
 	gotRoot, err := mem.Get("ga-root")
 	if err != nil {

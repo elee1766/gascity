@@ -6041,6 +6041,10 @@ func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStore
 			continue
 		}
 		sbInfo := match.info
+		// Observability cannot transfer an explicit claim to a different session.
+		if id := strings.TrimSpace(wb.Metadata[beadmeta.SessionIDMetadataKey]); id != "" && id != sbInfo.ID {
+			continue
+		}
 		sessionName := sessionBeadIdentifierInfo(sbInfo)
 		workDir := strings.TrimSpace(sbInfo.WorkDir)
 		if sessionName == "" && workDir == "" {
@@ -6065,7 +6069,7 @@ func stampRunSessionIdentity(cfg *config.City, workBeads []beads.Bead, workStore
 		// workBeads and route-time stamping skips it for pool agents. The
 		// dashboard's root-only snapshot reads the root's own metadata, so a
 		// worked step back-fills its root via gc.root_bead_id. (#2843)
-		stampRunRootFromStep(cfg, store, wb, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
+		stampRunRootFromStep(cfg, store, wb, sbInfo.ID, sessionName, workDir, !sbInfo.PoolManaged, stampedRoots, stderr)
 	}
 }
 
@@ -6087,7 +6091,7 @@ func workDirStampHasOwnershipEvidence(metadata map[string]string, workDir string
 // the root and writes only the keys that differ. Best-effort — a root that is
 // in another store, already gone, or already stamped is silently skipped (a
 // cross-store root gets stamped on its own store's reconcile pass).
-func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, sessionName, workDir string, allowUnownedWorkDir bool, stampedRoots map[string]struct{}, stderr io.Writer) {
+func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, sessionID, sessionName, workDir string, allowUnownedWorkDir bool, stampedRoots map[string]struct{}, stderr io.Writer) {
 	rootID := strings.TrimSpace(step.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" || rootID == step.ID {
 		return
@@ -6099,6 +6103,10 @@ func stampRunRootFromStep(cfg *config.City, store beads.Store, step beads.Bead, 
 	if err != nil {
 		// Cross-store / missing / transient — do NOT mark stamped, so a later
 		// step this pass (or a later reconcile) can retry resolving the root.
+		return
+	}
+	// A later step must not rewrite a root's explicit historical session binding.
+	if id := strings.TrimSpace(root.Metadata[beadmeta.SessionIDMetadataKey]); id != "" && id != sessionID {
 		return
 	}
 	stampedRoots[rootID] = struct{}{}

@@ -1582,6 +1582,11 @@ func unclaimWorkAssignedToRetiredSessionInfo(
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	if held, err := strandedRepairHeldWork(sw, releaseScope(retiredSession, sw.Legs().cfg)); err != nil || held {
+		fmt.Fprintf(stderr, "session beads: stranded repair of %s deferred: %v: %v\n", retiredSession.ID, errStrandedRepairHeldWork, err) //nolint:errcheck
+		res.Failed++
+		return res
+	}
 	if err := clearSessionCurrentClaim(store, retiredSession.ID); err != nil {
 		fmt.Fprintf(stderr, "session beads: clearing current claim on retired session %s: %v\n", retiredSession.ID, err) //nolint:errcheck
 	}

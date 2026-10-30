@@ -255,6 +255,11 @@ func (o ReleaseOutcome) Unserved() []strandedClaim {
 // policy says. A read that fails releases nothing on a startedKeeps path,
 // whose gate needs the whole seat; elsewhere what was read is released.
 func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why releaseWhy, opts ReleaseOpts) (ReleaseOutcome, error) {
+	if why == releaseStrandedRepair {
+		if held, err := strandedRepairHeldWork(sw, scope); err != nil || held {
+			return ReleaseOutcome{Refused: true}, errors.Join(err, errStrandedRepairHeldWork)
+		}
+	}
 	p := releasePolicies[why]
 	claims, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: p.statuses}, false)
 	if opts.Late {
@@ -343,6 +348,18 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 		out.Released = append(out.Released, c)
 	}
 	return out
+}
+
+var errStrandedRepairHeldWork = errors.New("blocked or held work requires coordinated handover before stranded repair")
+
+// Unheld workflow steps remain recoverable, but a parked pair must keep its owner.
+func strandedRepairHeldWork(sw *SeatWork, scope ReleaseScope) (bool, error) {
+	return sw.fresh(scope).has(seatWorkQuery{
+		scope: scope, statuses: seatWorkStatuses,
+		keep: func(_ beads.Store, b beads.Bead) (bool, error) {
+			return b.Status == "blocked" || beadmeta.HasDispatchHold(b.Labels), nil
+		},
+	})
 }
 
 // releaseRoute is the lane a released claim is demanded and claimed through,

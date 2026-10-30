@@ -335,10 +335,11 @@ type ledgerFeedAttachment struct {
 }
 
 // attachLedgerFeed decides whether store's cache gets a feed (it needs mode
-// auto, a background-refreshed cache with a cancellable ctx, and a store that
-// carries a journal, active or not). It returns nil when req is nil or the
-// mode is off.
-func attachLedgerFeed(ctx context.Context, req *ledgerFeedRequest, store beads.Store, backgroundRefresh bool) *ledgerFeedAttachment {
+// auto, a cancellable ctx, and a store that carries a journal, active or
+// not). A suspended scope gets its feed too: the feed's gate holds every
+// journal read until the scope resumes. It returns nil when req is nil or
+// the mode is off.
+func attachLedgerFeed(ctx context.Context, req *ledgerFeedRequest, store beads.Store) *ledgerFeedAttachment {
 	if req == nil || req.set == nil || req.mode != config.BeadsLedgerFeedAuto {
 		return nil
 	}
@@ -346,8 +347,6 @@ func attachLedgerFeed(ctx context.Context, req *ledgerFeedRequest, store beads.S
 	journal, lane, reason := ledgerFeedLane(store)
 	entry.lane = lane
 	switch {
-	case !backgroundRefresh:
-		entry.reason = "suspended at start"
 	case ctx == nil || ctx.Done() == nil:
 		entry.reason = "no background refresh"
 	case journal == nil:

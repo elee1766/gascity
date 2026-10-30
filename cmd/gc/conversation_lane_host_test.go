@@ -1341,7 +1341,7 @@ func TestStartConversationLaneHostRingsFromTheLedgerFeed(t *testing.T) {
 	defer cancel()
 	feeds := newLedgerFeedSet(t.TempDir(), ledgerFeedHooks{})
 	feeds.setWake(newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)))
-	att := attachLedgerFeed(ctx, &ledgerFeedRequest{set: feeds, scope: ledgerFeedCityScope, mode: config.BeadsLedgerFeedAuto}, store, true)
+	att := attachLedgerFeed(ctx, &ledgerFeedRequest{set: feeds, scope: ledgerFeedCityScope, mode: config.BeadsLedgerFeedAuto}, store)
 	if att == nil || att.entry.feed == nil {
 		t.Fatalf("no feed attached: %+v", att)
 	}

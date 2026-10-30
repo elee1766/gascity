@@ -383,25 +383,30 @@ func newControllerStateWithRoutes(
 	return cs
 }
 
-// wrapWithCachingStore wraps store in an in-memory read cache. When
-// backgroundRefresh is true the cache pre-primes active beads, fully primes
-// and runs a continuous reconcile loop (the steady-state cost: one bd
-// subprocess per cycle per scope). When false it does none of that: reads go
-// to bd on demand. Suspended rigs pass false: they spawn no agents, so nothing
-// writes locally, and gc must not touch a suspended scope at all — any bd read
-// restarts its retired proxy and Dolt (gastownhall/gascity #1978 follow-up,
-// #6561). The cache never tails a journal: wrapWithCachingStoreFeed builds
-// one that does.
-func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, opts ...beads.CachingStoreOption) beads.Store {
-	return wrapWithCachingStoreFeed(ctx, store, ep, backgroundRefresh, nil, opts...)
+// wrapWithCachingStore wraps store in an in-memory read cache. With a
+// cancellable ctx the cache runs a continuous reconcile loop (the steady-state
+// cost: one bd subprocess per cycle per scope) for its whole life. When prime
+// is true the cache also pre-primes active beads and fully primes before that
+// loop starts. When false it is left cold: nothing reads the scope at wrap,
+// and the reconcile loop's first admitted cycle loads it. Rigs suspended when
+// their store is built pass false with a reconcile gate that is closed while
+// the rig is suspended (rigReconcileGate): gc must not touch a suspended scope
+// at all, since any bd read restarts its retired proxy and Dolt
+// (gastownhall/gascity #1978 follow-up, #6561), yet a rig resumed later must
+// get a refreshing cache without a supervisor restart. The cache never tails a
+// journal: wrapWithCachingStoreFeed builds one that does.
+func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, prime bool, opts ...beads.CachingStoreOption) beads.Store {
+	return wrapWithCachingStoreFeed(ctx, store, ep, prime, nil, opts...)
 }
 
 // wrapWithCachingStoreFeed is wrapWithCachingStore that also tails the
 // scope's journal when feed asks for it and the scope can be tailed
 // (attachLedgerFeed). The journal head is read before PrimeActive, so a
 // mutation committed between the two is both primed and delivered, and the
-// feed runs until the cache is stopped.
-func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, feed *ledgerFeedRequest, opts ...beads.CachingStoreOption) beads.Store {
+// feed runs until the cache is stopped. A cold cache's feed reads the head
+// through its gate: while the scope is gated the baseline is late, and the
+// feed takes it once the gate opens and then forces a re-scan.
+func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.Provider, prime bool, feed *ledgerFeedRequest, opts ...beads.CachingStoreOption) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
 	if baseStore == nil {
 		return nil
@@ -413,7 +418,7 @@ func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.
 	if ep != nil {
 		recorder = ep
 	}
-	attached := attachLedgerFeed(ctx, feed, baseStore, backgroundRefresh)
+	attached := attachLedgerFeed(ctx, feed, baseStore)
 	cs := beads.NewCachingStore(baseStore, attached.observe(cacheChangeRecorder(recorder)), opts...)
 	if attached != nil {
 		attached.bind(ctx, feed.set, cs)
@@ -421,25 +426,32 @@ func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
-	// reach "ready" without waiting for the full prime. A suspended rig
-	// (no background refresh) is not primed at all: it is left cold, and
-	// any read it does get goes to bd on demand.
-	if backgroundRefresh {
+	// reach "ready" without waiting for the full prime. A cold cache
+	// (suspended rig) is not primed: any read it gets before its first
+	// reconcile goes to bd on demand.
+	if prime {
 		if err := cs.PrimeActive(); err != nil {
 			log.Printf("caching-store: pre-prime failed: %v", err)
 		}
 	}
-	// No cancellable ctx, or caller opted out of background refresh (suspended
-	// rig): serve from the synchronous pre-prime only, no async prime/reconcile.
-	if ctx.Done() == nil || !backgroundRefresh {
+	// No cancellable ctx: serve from the synchronous pre-prime only, no async
+	// prime/reconcile.
+	if ctx.Done() == nil {
 		if policyWrapped {
 			return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
 		}
 		return cs
 	}
-	// Full prime runs async — backfills remaining beads for List()
-	// callers (convergence reconcile, sweep, API handlers).
-	go primeThenStartReconciler(ctx, cs, os.Getenv("GC_AGENT"))
+	if prime {
+		// Full prime runs async — backfills remaining beads for List()
+		// callers (convergence reconcile, sweep, API handlers).
+		go primeThenStartReconciler(ctx, cs, os.Getenv("GC_AGENT"))
+	} else {
+		// The full prime is ungated, so a cold cache skips it: its first
+		// reconcile, held by the gate while the scope is suspended, loads
+		// the same snapshot and promotes it live.
+		cs.StartReconciler(ctx, beads.WithStaggerAuto(), os.Getenv("GC_AGENT"))
+	}
 	attached.start(ctx)
 	if policyWrapped {
 		return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
@@ -530,17 +542,14 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 	return stores
 }
 
-// rigStoreBackgroundRefresh reports whether the controller should run
-// the continuous cache refresh (async full prime + watchdog reconciler)
-// for a rig's bead store. Suspended rigs skip it: they spawn no agents,
-// so nothing writes locally and reconciling them every cycle is pure
-// cost (gastownhall/gascity #1978 follow-up). Suspension here is the
+// rigStoreBackgroundRefresh reports whether a rig's bead store is primed
+// when it is built. Suspended rigs are left cold: they spawn no agents, so
+// nothing writes locally, and priming would read the suspended scope
+// (gastownhall/gascity #1978 follow-up). Their reconcile loop and feed still
+// run, held by rigReconcileGate until the rig resumes. Suspension here is the
 // EFFECTIVE state — the runtime suspend/resume override layered over the
 // rig's committable suspended_on_start default — not the deprecated raw
-// [[rigs]] suspended field alone. Gating on the raw field misfires both
-// ways: a rig resumed at runtime keeps refreshing only by accident of
-// which config spelling it used, and a suspended_on_start rig never gets
-// the skip at all.
+// [[rigs]] suspended field alone.
 func rigStoreBackgroundRefresh(suspState suspensionstate.State, rig config.Rig) bool {
 	return !suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart())
 }

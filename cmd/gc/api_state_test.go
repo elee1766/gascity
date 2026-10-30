@@ -2295,39 +2295,54 @@ func TestWrapWithCachingStoreReturnsNilStore(t *testing.T) {
 	}
 }
 
-// TestWrapWithCachingStoreNoBackgroundRefresh covers the suspended-rig path:
-// with backgroundRefresh=false the cache still serves pre-primed reads but does
-// NOT start the reconcile loop (StaggerOffsetMs stays 0), so a suspended rig
-// stops costing a bd subprocess per reconcile cycle.
-func TestWrapWithCachingStoreNoBackgroundRefresh(t *testing.T) {
-	backing := beads.NewMemStore()
-	created, err := backing.Create(beads.Bead{Title: "suspended-rig bead"})
+// A rig suspended when its store is built gets a cold cache whose reconcile
+// loop and journal feed wait behind the rig's gate: nothing reads the scope
+// while it stays suspended, and once it resumes the cache loads and goes live
+// without a rebuild. Before this the cache of a rig suspended at supervisor
+// start never refreshed after a runtime resume.
+func TestWrapWithCachingStoreColdRigRefreshesAfterResume(t *testing.T) {
+	t.Setenv("GC_AGENT", "resume-test-3194") // auto stagger of 13ms
+	store := newJournalingStore()
+	created, err := store.Create(beads.Bead{Title: "rig work"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	// Cancellable ctx so the refresh path is reachable (Background() always
-	// early-returns regardless of the flag).
+	reads := store.j.reads.Load()
+	var resumed atomic.Bool
+	set := newLedgerFeedSet(t.TempDir(), ledgerFeedHooks{})
+	req := &ledgerFeedRequest{set: set, scope: ledgerFeedRigScope("r"), mode: config.BeadsLedgerFeedAuto, admit: resumed.Load}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	store := wrapWithCachingStore(ctx, backing, nil, false)
-	cached, ok := store.(*beads.CachingStore)
-	if !ok {
-		t.Fatalf("store type = %T, want *beads.CachingStore", store)
+	cache := wrapWithCachingStoreFeed(ctx, store, events.NewFake(), false, req, beads.WithReconcileGate(resumed.Load)).(*beads.CachingStore)
+	defer cache.StopReconciler()
+
+	time.Sleep(200 * time.Millisecond)
+	if got := store.lists.Load(); got != 0 {
+		t.Fatalf("the suspended rig's store was listed %d time(s)", got)
 	}
-	// Pre-primed reads still work (on-demand access to a suspended rig).
-	items, err := cached.ListOpen()
+	if got := store.j.reads.Load() - reads; got != 0 {
+		t.Fatalf("the suspended rig's journal was read %d time(s)", got)
+	}
+	if cache.IsLive() {
+		t.Fatal("the suspended rig's cache is live before any read")
+	}
+
+	resumed.Store(true)
+	waitForLedgerFeed(t, 10*time.Second, cache.IsLive, "the resumed rig's cache to go live")
+	_, entries := set.snapshot()
+	if len(entries) != 1 || entries[0].feed == nil {
+		t.Fatalf("entries = %+v, want one feed for the rig", entries)
+	}
+	waitForLedgerFeed(t, 5*time.Second, func() bool {
+		return entries[0].feed.status(time.Now()).State == ledgerFeedStateTailing
+	}, "the resumed rig's feed to tail")
+	items, err := cache.List(beads.ListQuery{Status: "open"})
 	if err != nil {
-		t.Fatalf("ListOpen: %v", err)
+		t.Fatalf("List: %v", err)
 	}
 	if len(items) != 1 || items[0].ID != created.ID {
-		t.Fatalf("ListOpen = %#v, want only %s", items, created.ID)
-	}
-	// Reconciler never armed: StartReconciler (which sets StaggerOffsetMs) was
-	// not called. Give any erroneously-spawned goroutine a moment to set it.
-	time.Sleep(50 * time.Millisecond)
-	if got := cached.Stats().StaggerOffsetMs; got != 0 {
-		t.Fatalf("StaggerOffsetMs = %d, want 0 (reconciler must not start when backgroundRefresh=false)", got)
+		t.Fatalf("List = %#v, want only %s", items, created.ID)
 	}
 }
 

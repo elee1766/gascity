@@ -305,7 +305,7 @@ func newFeedHarness(t *testing.T, store *journalingStore) *feedHarness {
 	})
 	h.set.setWake(newLegacyWake(h.pokeCh, h.ctrlCh))
 	req := &ledgerFeedRequest{set: h.set, scope: ledgerFeedCityScope, mode: config.BeadsLedgerFeedAuto}
-	att := attachLedgerFeed(ctx, req, store, true)
+	att := attachLedgerFeed(ctx, req, store)
 	if att == nil || att.entry.feed == nil {
 		t.Fatalf("no feed attached: %+v", att)
 	}
@@ -1024,7 +1024,7 @@ func TestLedgerFeedKeepsADroppedNeverHeldClose(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ep := events.NewFake()
-		att := attachLedgerFeed(ctx, req, store, true)
+		att := attachLedgerFeed(ctx, req, store)
 		cache := beads.NewCachingStore(store, att.observe(cacheChangeRecorder(ep)))
 		att.bind(ctx, set, cache)
 		f := att.entry.feed
@@ -1411,7 +1411,7 @@ func TestLedgerFeedHonorsTheGateAndCountsStoreWork(t *testing.T) {
 	req := &ledgerFeedRequest{set: set, scope: ledgerFeedRigScope("r"), mode: config.BeadsLedgerFeedAuto, admit: open.Load}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	att := attachLedgerFeed(ctx, req, store, true)
+	att := attachLedgerFeed(ctx, req, store)
 	cache := beads.NewCachingStore(store, att.observe(cacheChangeRecorder(events.NewFake())))
 	att.bind(ctx, set, cache)
 	f := att.entry.feed
@@ -1513,7 +1513,7 @@ func TestLedgerFeedDropsAnUnrefreshableRowAndRequestsARescan(t *testing.T) {
 	req := &ledgerFeedRequest{set: set, scope: ledgerFeedCityScope, mode: config.BeadsLedgerFeedAuto}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	att := attachLedgerFeed(ctx, req, cold, true)
+	att := attachLedgerFeed(ctx, req, cold)
 	cache := beads.NewCachingStore(cold, att.observe(cacheChangeRecorder(nil)))
 	att.bind(ctx, set, cache)
 	if _, err := cold.Create(beads.Bead{Title: "cold"}); err != nil {
@@ -1570,29 +1570,27 @@ func TestAttachLedgerFeedDecision(t *testing.T) {
 	req := func(mode string) *ledgerFeedRequest {
 		return &ledgerFeedRequest{set: set, scope: "s", mode: mode}
 	}
-	if att := attachLedgerFeed(ctx, req(config.BeadsLedgerFeedOff), newJournalingStore(), true); att != nil {
+	if att := attachLedgerFeed(ctx, req(config.BeadsLedgerFeedOff), newJournalingStore()); att != nil {
 		t.Fatal("mode off attached")
 	}
-	if att := attachLedgerFeed(ctx, nil, newJournalingStore(), true); att != nil {
+	if att := attachLedgerFeed(ctx, nil, newJournalingStore()); att != nil {
 		t.Fatal("no request attached")
 	}
 	inactive := newJournalingStore()
 	inactive.j.active.Store(false)
 	for _, tc := range []struct {
-		name       string
-		ctx        context.Context
-		store      beads.Store
-		background bool
-		reason     string
+		name   string
+		ctx    context.Context
+		store  beads.Store
+		reason string
 	}{
-		{"suspended", ctx, newJournalingStore(), false, "suspended at start"},
-		{"no cancellable ctx", context.Background(), newJournalingStore(), true, "no background refresh"},
-		{"untailable lane", ctx, beads.NewMemStore(), true, "lane *beads.MemStore cannot be tailed"},
+		{"no cancellable ctx", context.Background(), newJournalingStore(), "no background refresh"},
+		{"untailable lane", ctx, beads.NewMemStore(), "lane *beads.MemStore cannot be tailed"},
 		// A scope whose journal is off gets a feed that waits for it.
-		{"inactive", ctx, inactive, true, ""},
-		{"tailed", ctx, newJournalingStore(), true, ""},
+		{"inactive", ctx, inactive, ""},
+		{"tailed", ctx, newJournalingStore(), ""},
 	} {
-		att := attachLedgerFeed(tc.ctx, req(config.BeadsLedgerFeedAuto), tc.store, tc.background)
+		att := attachLedgerFeed(tc.ctx, req(config.BeadsLedgerFeedAuto), tc.store)
 		if att == nil || att.entry.reason != tc.reason || (att.entry.feed != nil) != (tc.reason == "") {
 			t.Fatalf("%s: attachment %+v, want reason %q", tc.name, att, tc.reason)
 		}

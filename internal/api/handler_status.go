@@ -216,8 +216,8 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 	agentDetails := make([]StatusAgentDetail, 0, len(cfg.Agents))
 	suspendedRigs := make(map[string]bool, len(cfg.Rigs))
 	// cacheColdRigs mirrors the controller's per-rig cache refresh gate
-	// (rigStoreBackgroundRefresh): a rig suspended by EFFECTIVE state gets no
-	// cache at all, and status does not read its store (statusWorkCounts). It is deliberately not
+	// (rigReconcileGate): a rig suspended by EFFECTIVE state has a cache that
+	// does not refresh, and status does not read its store (statusWorkCounts). It is deliberately not
 	// the same set as suspendedRigs, which grows below to include rigs merely
 	// inferred suspended because every one of their agents is — those keep a
 	// refreshing cache and must still be asked for ready work.

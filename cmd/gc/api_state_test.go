@@ -2317,6 +2317,10 @@ func TestWrapWithCachingStoreColdRigRefreshesAfterResume(t *testing.T) {
 	cache := wrapWithCachingStoreFeed(ctx, store, events.NewFake(), false, req, beads.WithReconcileGate(resumed.Load)).(*beads.CachingStore)
 	defer cache.StopReconciler()
 
+	// A due reconcile, both run directly and kicked through the loop, is held
+	// by the gate: an unprimed cache is always due.
+	cache.ReconcileIfDueForTest()
+	cache.RequestReconcile()
 	time.Sleep(200 * time.Millisecond)
 	if got := store.lists.Load(); got != 0 {
 		t.Fatalf("the suspended rig's store was listed %d time(s)", got)

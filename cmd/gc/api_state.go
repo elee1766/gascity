@@ -482,11 +482,16 @@ func primeThenStartReconciler(ctx context.Context, cs *beads.CachingStore, agent
 
 // buildStores creates bead stores for each rig in cfg.
 // Mail providers are NOT built here — all mail uses the city-level store.
-// Does not read or write mutable cs fields (safe to call unlocked); reads
-// the runtime suspension state file to gate per-rig cache refresh.
+// Does not read or write mutable cs fields other than the atomic
+// suspendedRigs (safe to call unlocked); reads the runtime suspension state
+// file to gate per-rig cache refresh.
 func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store {
 	cityProvider := rawBeadsProviderForScope(cs.cityPath, cs.cityPath)
 	suspState := loadSuspensionStateBestEffort(cs.cityPath)
+	// A cold rig cache's reconcile loop and feed are gated by suspendedRigs.
+	// Publish the state this build saw before wrapping, so a rig suspended
+	// since the last tick is not admitted by a stale gate.
+	cs.setSuspendedRigs(buildEffectiveSuspendedRigNames(cfg, suspState))
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
 
 	var sharedLegacyFileStore beads.Store

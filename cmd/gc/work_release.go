@@ -354,12 +354,15 @@ var errStrandedRepairHeldWork = errors.New("blocked or held work requires coordi
 
 // Unheld workflow steps remain recoverable, but a parked pair must keep its owner.
 func strandedRepairHeldWork(sw *SeatWork, scope ReleaseScope) (bool, error) {
-	return sw.fresh(scope).has(seatWorkQuery{
+	q := seatWorkQuery{
 		scope: scope, statuses: seatWorkStatuses,
 		keep: func(_ beads.Store, b beads.Bead) (bool, error) {
 			return b.Status == "blocked" || beadmeta.HasDispatchHold(b.Labels), nil
 		},
-	})
+	}
+	// The legacy tick shares its census; v2 supplies a fresh per-effect read.
+	held, err := sw.snapshot(q, true)
+	return len(held) > 0, err
 }
 
 // releaseRoute is the lane a released claim is demanded and claimed through,

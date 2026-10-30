@@ -69,7 +69,7 @@ const (
 var closeSections = []section{
 	calledWhen(callStop, section{Decide: closeCorpseStep}, corpseKill.found, killCorpse),
 	calledWhen(callWork, probed(strandedProbe, closeWorkStep), closeRelease.wanted, releaseBeforeClose),
-	asClose(probed(strandedOnlyProbe, closeStep)),
+	asClose(probed(closeWorkProbe, closeStep)),
 }
 
 // asClose is sec as a close section.
@@ -78,18 +78,24 @@ func asClose(sec section) section {
 	return sec
 }
 
-// strandedOnlyProbe reads, for an orphan whose L5 still finds work after
-// its release, whether every claim left is one no lane serves under the
-// cascade's rule: an orphaned orphan's close then lands over them (closeStep
-// decides which), and the cascade keeps, stamps and alerts on them (O5,
-// revised).
-func strandedOnlyProbe(_ context.Context, r effectReads, v txView) (bool, error) {
+type closeWorkState struct {
+	onlyStranded bool
+	held         bool
+}
+
+// Check parked repair work and an orphan's unserved claims before close.
+func closeWorkProbe(_ context.Context, r effectReads, v txView) (closeWorkState, error) {
 	c := v.It.Closing
+	if c.Repair && v.World.Env != nil {
+		scope := releaseScope(v.Row, v.World.Env.Cfg)
+		held, err := strandedRepairHeldWork(seatWorkFor(r.legs, scope), scope)
+		return closeWorkState{held: held}, err
+	}
 	if c.Kind != closeOrphan || v.Fence.Work == nil || v.Fence.Work.Free || v.World.Env == nil {
-		return false, nil
+		return closeWorkState{}, nil
 	}
 	scope := releaseScope(v.Row, v.World.Env.Cfg)
-	return onlyStrandedWork(seatWorkFor(r.legs, scope), v.Row, releaseOrphan), nil
+	return closeWorkState{onlyStranded: onlyStrandedWork(seatWorkFor(r.legs, scope), v.Row, releaseOrphan)}, nil
 }
 
 // redecideClose is A21 decided again on the fresh row and runtime read:
@@ -298,7 +304,7 @@ func releaseBeforeClose(_ context.Context, c txCaps, r closeRelease) (closeRelea
 }
 
 // closeStep is the premise close's Decide.
-func closeStep(v txView, strandedOnly bool, _ error) txStep {
+func closeStep(v txView, workState closeWorkState, probeErr error) txStep {
 	rel, relErr := callResult[closeReleased](v)
 	step := txStep{Facts: effectFacts{Events: rel.events}}
 	fresh, cause := redecideClose(v)
@@ -309,6 +315,8 @@ func closeStep(v txView, strandedOnly bool, _ error) txStep {
 	switch c := fresh.Closing; {
 	case cause != "":
 		step.Refuse = cause
+	case c.Repair && (workState.held || probeErr != nil):
+		step.Refuse, step.Err = causeHasWork, probeErr
 	case c.Repair && rel.why == releaseStrandedRepair && (relErr != nil || len(rel.out.Failed) > 0):
 		step.Refuse, step.Err = causeReleaseFailed, relErr
 	case c.Repair && rel.why == releaseStrandedRepair:
@@ -319,7 +327,7 @@ func closeStep(v txView, strandedOnly bool, _ error) txStep {
 		// claims do not keep it (O5, revised). A repair needs none: A21 never
 		// decides one on a row KeepsSlot holds, and redecideClose refuses a
 		// suspend that lands after the pass.
-		switch step.Refuse = closePermitted(v.Row, closeGated, work && !c.Phantom && (!c.Orphaned || !strandedOnly)); {
+		switch step.Refuse = closePermitted(v.Row, closeGated, work && !c.Phantom && (!c.Orphaned || !workState.onlyStranded)); {
 		case step.Refuse == causeHasWork && v.Fence.Work != nil:
 			step.Err = v.Fence.Work.Err
 		case step.Refuse == "":

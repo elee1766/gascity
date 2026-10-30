@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -431,13 +432,49 @@ func closeEffectCases(t *testing.T, bare bool) {
 	})
 	t.Run("an aged marker unclaims, then closes stranded-repair (SESS-625)", func(t *testing.T) {
 		c := mk(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339), strandedEventEmittedKey, gatherNow.Add(-time.Hour).Format(time.RFC3339))
-		claim := c.work(t, "in_progress", routedClaim())
+		meta := routedClaim()
+		meta["gc.root_bead_id"] = "original-root"
+		claim := c.work(t, "in_progress", meta)
 		s := c.run(t, gone().tmux())
 		if b := c.row(t); s.Outcome != settledLanded || b.Metadata["state"] != strandedRepairCloseReason {
 			t.Fatalf("settlement %+v row %v, want closed stranded-repair", s, b.Metadata)
 		}
 		if got, _ := c.store.Get(claim.ID); got.Assignee != "" {
 			t.Fatalf("claim assignee %q, want released", got.Assignee)
+		}
+	})
+	t.Run("stranded repair preserves parked ownership", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, status string
+			labels       []string
+		}{
+			{name: "blocked", status: "blocked"},
+			{name: "external hold", status: "open", labels: []string{"hold:external"}},
+			{name: "mayor hold", status: "in_progress", labels: []string{"hold:mayor"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				c := mk(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339), strandedEventEmittedKey, gatherNow.Add(-time.Hour).Format(time.RFC3339))
+				source := c.work(t, tc.status, map[string]string{"gc.root_bead_id": "original-root", "gc.session_id": c.k.ID})
+				if err := c.store.Update(source.ID, beads.UpdateOpts{Labels: tc.labels}); err != nil {
+					t.Fatal(err)
+				}
+				step := c.work(t, "in_progress", routedClaim())
+				beforeSource, _ := c.store.Get(source.ID)
+				beforeStep, _ := c.store.Get(step.ID)
+				s := c.run(t, gone().tmux())
+				if s.Closed || c.row(t).Status == "closed" {
+					t.Fatalf("settlement %+v retired the owner of parked work", s)
+				}
+				for _, before := range []beads.Bead{beforeSource, beforeStep} {
+					after, err := c.store.Get(before.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if after.Status != before.Status || after.Assignee != before.Assignee || !maps.Equal(after.Metadata, before.Metadata) || !slices.Equal(after.Labels, before.Labels) {
+						t.Fatalf("stranded repair changed protected pair member %s: before %+v, after %+v", before.ID, before, after)
+					}
+				}
+			})
 		}
 	})
 	t.Run("a killed seat gives back its unexecuted claim, then closes (B1)", func(t *testing.T) {

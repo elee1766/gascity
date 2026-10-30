@@ -4295,6 +4295,24 @@ func TestReconcileSessionBeads_StrandedRepairFiresAfterContinuousWindow(t *testi
 	}
 }
 
+func TestReconcileSessionBeads_StrandedRepairPreservesBlockedOwner(t *testing.T) {
+	env, owner, work, _ := strandedRepairReconcileEnv(t)
+	blocked := "blocked"
+	if err := env.store.Update(work.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := env.store.Get(work.ID)
+	runStrandedReconcileTick(t, env, []beads.Bead{owner})
+	env.clk.Time = env.clk.Time.Add(strandedRepairConfirmGrace + time.Minute)
+	owner, _ = env.store.Get(owner.ID)
+	runStrandedReconcileTick(t, env, []beads.Bead{owner})
+	owner, _ = env.store.Get(owner.ID)
+	after, _ := env.store.Get(work.ID)
+	if owner.Status == "closed" || after.Status != before.Status || after.Assignee != before.Assignee {
+		t.Fatalf("stranded repair retired blocked work: owner=%+v before=%+v after=%+v", owner, before, after)
+	}
+}
+
 // Regression for the bypassable confirmation window: a worker that strands, is
 // respawned on the SAME session bead, recovers (observed alive for a tick), then
 // re-strands must NOT be repaired on the first episode's stale marker. The alive

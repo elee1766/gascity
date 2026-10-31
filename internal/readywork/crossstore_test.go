@@ -569,9 +569,9 @@ func TestReadCrossStoreCostOnASplitCity(t *testing.T) {
 
 // TestReadInProgressKeepsBdSemanticsOnASingleStoreCity: on a city with no
 // class binding the crash-recovery tier's blocked_by is bd's answer. bd never
-// blocks on an external: target, a capability, or a cross-rig id the serving
-// store does not hold, so those rows carry no blocker; a same-store open
-// blocker still reads as one (the control).
+// blocks on an external: target or a capability, so those rows carry no
+// blocker; a same-store open blocker still reads as one (the control), and a
+// cross-rig work blocker resolves from the other work leg.
 func TestReadInProgressKeepsBdSemanticsOnASingleStoreCity(t *testing.T) {
 	city := splittest.NewNativeWorkStore(t, "gc")
 	rig := splittest.NewNativeWorkStore(t, "rg")
@@ -588,8 +588,9 @@ func TestReadInProgressKeepsBdSemanticsOnASingleStoreCity(t *testing.T) {
 		}
 		return b.ID
 	}
-	external := []string{mk("ext id", "external:"+rb.ID), mk("cross rig", rb.ID), mk("cap", "external:rg:cap")}
+	external := []string{mk("ext id", "external:"+rb.ID), mk("cap", "external:rg:cap")}
 	held := mk("own blocker", own.ID)
+	crossRig := mk("cross rig", rb.ID)
 	legs := []Leg{testLeg("city", city), testLeg("rig:rg", rig)}
 	rows, err := Read(legs, Query{Status: StatusInProgress, Assignee: "w1"})
 	if err != nil {
@@ -606,6 +607,10 @@ func TestReadInProgressKeepsBdSemanticsOnASingleStoreCity(t *testing.T) {
 	}
 	if r := byID[held]; len(r.BlockedBy) != 1 || r.BlockedBy[0].Status != "open" {
 		t.Errorf("row %s blocked_by = %+v, want its same-store open blocker", held, r.BlockedBy)
+	}
+	// Work dependencies may cross rigs: the other work leg resolves the target.
+	if r := byID[crossRig]; len(r.BlockedBy) != 1 || r.BlockedBy[0].ID != rb.ID || r.BlockedBy[0].Status != "open" {
+		t.Errorf("row %s blocked_by = %+v, want the cross-rig open blocker %s", crossRig, r.BlockedBy, rb.ID)
 	}
 }
 

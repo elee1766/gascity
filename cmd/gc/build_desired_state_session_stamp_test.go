@@ -263,6 +263,7 @@ func TestStampRunSessionIdentityPreservesExplicitBindings(t *testing.T) {
 		})
 	}
 }
+
 func TestStampRunSessionIdentitySkipsNonExecuting(t *testing.T) {
 	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession("worker-x", "/wd")})
 

@@ -195,7 +195,8 @@ func openSQLiteWorkScopeWithPrefix(scopeRoot, prefix string, initialize bool, ex
 	opts := append([]beads.SQLiteStoreOption{
 		beads.WithSQLiteStoreIDPrefix(prefix),
 		beads.WithSQLiteStoreReservedIDPrefixes(prefix),
-		beads.WithSQLiteStoreRetention(0, 0)}, extra...)
+		beads.WithSQLiteStoreRetention(0, 0),
+	}, extra...)
 	store, err := beads.OpenSQLiteWorkStore(dir, opts...)
 	if err != nil {
 		return nil, err

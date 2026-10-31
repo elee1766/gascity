@@ -16,8 +16,10 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-const sqliteWorkNotesKey = "gc.work.notes"
-const sqliteWorkCommentsKey = "gc.work.comments"
+const (
+	sqliteWorkNotesKey    = "gc.work.notes"
+	sqliteWorkCommentsKey = "gc.work.comments"
+)
 
 type sqliteWorkComment struct {
 	Author    string    `json:"author"`

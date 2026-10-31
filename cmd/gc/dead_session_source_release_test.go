@@ -16,8 +16,10 @@ func TestReleaseOrphanedPoolAssignments_ReleasesDeadOwnerSource(t *testing.T) {
 	rig := beads.NewMemStore()
 	const dead = "worker-dead"
 
-	held, err := rig.Create(beads.Bead{Title: "source", Assignee: dead, Labels: []string{beadmeta.HoldExternalLabel},
-		Metadata: map[string]string{workLeaseExpiresMetadataKey: "2026-10-25T07:00:00Z"}})
+	held, err := rig.Create(beads.Bead{
+		Title: "source", Assignee: dead, Labels: []string{beadmeta.HoldExternalLabel},
+		Metadata: map[string]string{workLeaseExpiresMetadataKey: "2026-10-25T07:00:00Z"},
+	})
 	requireNoError(t, err)
 	requireNoError(t, rig.Update(held.ID, beads.UpdateOpts{Status: stringPtr("blocked")}))
 	other, err := rig.Create(beads.Bead{Title: "other owner", Assignee: "worker-live"})

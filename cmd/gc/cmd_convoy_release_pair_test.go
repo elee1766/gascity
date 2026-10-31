@@ -90,8 +90,10 @@ name = "control-dispatcher"
 	t.Setenv("GC_BEADS", "sqlite-work")
 	t.Setenv("HOME", filepath.Join(dir, "home"))
 	sessions := c.sessionStore()
-	session, err := sessions.Create(beads.Bead{Title: "retired session", Type: "session", Labels: []string{"gc:session"},
-		Metadata: map[string]string{"alias": releasePairDeadOwner, "session_name": "pool-retired"}})
+	session, err := sessions.Create(beads.Bead{
+		Title: "retired session", Type: "session", Labels: []string{"gc:session"},
+		Metadata: map[string]string{"alias": releasePairDeadOwner, "session_name": "pool-retired"},
+	})
 	if err != nil {
 		t.Fatalf("creating session bead: %v", err)
 	}
@@ -186,8 +188,10 @@ func (c *releasePairCity) show(id string) releasePairRow {
 
 func (c *releasePairCity) releasePair(extra ...string) (string, string, int) {
 	c.t.Helper()
-	args := append([]string{"convoy", "release-pair", c.source, "--step", c.step, "--from", c.owner,
-		"--old-session", c.session, "--handover-id", "h1", "--manifest", filepath.Join(c.dir, "handover.json")}, extra...)
+	args := append([]string{
+		"convoy", "release-pair", c.source, "--step", c.step, "--from", c.owner,
+		"--old-session", c.session, "--handover-id", "h1", "--manifest", filepath.Join(c.dir, "handover.json"),
+	}, extra...)
 	if c.rootSession != "" {
 		args = append(args, "--root-session", c.rootSession)
 	}

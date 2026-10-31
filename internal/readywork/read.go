@@ -2,7 +2,6 @@ package readywork
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 

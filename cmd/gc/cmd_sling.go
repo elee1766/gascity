@@ -1666,7 +1666,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		sessStore := cliSessionStore(store, cfg, cityPath)
 		sn := lookupSessionNameOrLegacy(sessStore, cityName, spec.Identity, st)
 		target := buildSlingNudgeTarget(*a, cityName, cityPath, cfg, sessStore, sn)
-		deliverSlingNudge(target, sp, store, cityPath, stdout, stderr)
+		deliverSlingNudge(target, sp, store, city.store, cityPath, beadID, stdout, stderr)
 		return
 	}
 

@@ -124,6 +124,7 @@ cmd/gc/bd_inventory_trust.go	bdReadEdgeEndpoints	cap-assert	1
 cmd/gc/bd_write_guard.go	bdWriteGuardStore	raw-result	1
 cmd/gc/bead_policy_store.go	beadPolicyGraphStore	raw-field	1
 cmd/gc/bead_policy_store.go	beadPolicyStore	raw-field	1
+cmd/gc/bead_policy_store.go	beadPolicyStore.AssignmentClaimTarget	raw-result	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.ChildrenOfAny	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.Claim	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.ConditionalWritesResolveTarget	raw-result	1
@@ -132,8 +133,10 @@ cmd/gc/bead_policy_store.go	beadPolicyStore.DeleteBatch	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.DepMetadata	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.GetExactBatch	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.ReadyContext	cap-assert	1
+cmd/gc/bead_policy_store.go	beadPolicyStore.ReclaimStale	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.ReleaseIfCurrent	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.SawRows	cap-assert	1
+cmd/gc/bead_policy_store.go	beadPolicyStore.TransferIfCurrent	cap-assert	1
 cmd/gc/bead_policy_store.go	beadPolicyStore.WaitForParentProjection	cap-assert	1
 cmd/gc/bead_policy_store.go	borrowedStoreWithBeadPolicies	raw-param	1
 cmd/gc/bead_policy_store.go	borrowedStoreWithBeadPolicies	raw-result	1
@@ -407,6 +410,7 @@ cmd/gc/cmd_agent_is_foreign.go	doAgentIsForeign	raw-result	1
 cmd/gc/cmd_bd.go	doBd	cap-assert	1
 cmd/gc/cmd_bd.go	doBdReleaseIfCurrent	cap-assert	1
 cmd/gc/cmd_bd_by_id.go	bdByIDClassDoor	raw-field	1
+cmd/gc/cmd_bd_sqlite_work.go	updateSQLiteWorkText	raw-param	1
 cmd/gc/cmd_bd_store_bridge.go	bdStoreBridgeReopen	raw-param	1
 cmd/gc/cmd_beads_metadata_cas.go	applyBeadsMetadataCAS	raw-param	1
 cmd/gc/cmd_beads_metadata_cas.go	beadsMetadataCASClassFlipRefusal	raw-param	1
@@ -516,6 +520,10 @@ cmd/gc/cmd_convoy_dispatch.go	sourceWorkflowChildSources	raw-param	1
 cmd/gc/cmd_convoy_dispatch.go	sourceWorkflowMatchCollector.scanStore	read-marker	1
 cmd/gc/cmd_convoy_dispatch.go	sourceWorkflowStoreMatch	raw-field	1
 cmd/gc/cmd_convoy_dispatch.go	workflowStoreMatch	raw-field	1
+cmd/gc/cmd_convoy_release_pair.go	releasePairConvoyTracks	raw-param	1
+cmd/gc/cmd_convoy_release_pair.go	releasePairRun	raw-field	1
+cmd/gc/cmd_convoy_release_pair.go	releasePairRun.inventory	raw-param	1
+cmd/gc/cmd_convoy_release_pair.go	releasePairRun.resolve	raw-result	2
 cmd/gc/cmd_doctor.go	openStoreForCity	raw-result	2
 cmd/gc/cmd_doctor.go	perRunStoreFactory	raw-field	1
 cmd/gc/cmd_doctor.go	perRunStoreFactory	raw-param	1
@@ -559,10 +567,8 @@ cmd/gc/cmd_handoff.go	runHandoff	unwrap	1
 cmd/gc/cmd_handoff.go	sessionRestartableByController	raw-param	1
 cmd/gc/cmd_hook_claim.go	continuationLaneNotice	raw-param	1
 cmd/gc/cmd_hook_claim.go	continuationLaneNoticeIn	raw-param	1
-cmd/gc/cmd_hook_claim.go	hookClaimBdStore	raw-result	1
 cmd/gc/cmd_hook_claim.go	hookClaimBdStoreContext	raw-result	1
 cmd/gc/cmd_hook_claim.go	hookWorkflowStoreFunc	raw-type	1
-cmd/gc/cmd_hook_claim.go	hookWorkflowStoreWithBdStore	raw-result	1
 cmd/gc/cmd_hook_claim.go	skipDoneWorkflow	raw-param	1
 cmd/gc/cmd_hook_claim.go	workflowInputDone	raw-param	1
 cmd/gc/cmd_hook_claim.go	workflowInputDoneAcross	raw-param	2
@@ -775,6 +781,11 @@ cmd/gc/convoy_fields.go	setConvoyFields	raw-param	1
 cmd/gc/cross_store_gate_lane.go	crossStoreBlockerLeg	raw-field	1
 cmd/gc/cross_store_gate_lane.go	crossStoreBlockerResolver	raw-param	3
 cmd/gc/cross_store_gate_lane.go	crossStoreBlockerResolverOver	raw-param	1
+cmd/gc/dead_session_source_release.go	releaseDeadOwnerSource	raw-param	1
+cmd/gc/dead_session_source_release.go	releaseDeadOwnerSourceClaims	raw-param	3
+cmd/gc/dead_session_source_release.go	sourceStoreForRoot	raw-param	3
+cmd/gc/dead_session_source_release.go	sourceStoreForRoot	raw-result	1
+cmd/gc/dead_session_source_release.go	stepTracksSource	raw-param	3
 cmd/gc/demand_cross_store_gate.go	crossStoreGateLeg	raw-param	1
 cmd/gc/demand_cross_store_gate.go	crossStoreGateLegs	raw-param	2
 cmd/gc/demand_serve_predicate.go	beadHasUnmetPlainBlocksDep	raw-param	1
@@ -925,6 +936,18 @@ cmd/gc/graph_placement.go	graphResidenceForTree	read-marker	1
 cmd/gc/graph_placement.go	splitRigGraphRelicFree	cap-assert	1
 cmd/gc/hook_city.go	hookCityStoreOpener	raw-var	1
 cmd/gc/hook_claim_bead_events.go	announcedRows	raw-param	1
+cmd/gc/hook_claim_store.go	closeHookClaimStore	raw-param	1
+cmd/gc/hook_claim_store.go	closeHookWorkflowStore	cap-assert	1
+cmd/gc/hook_claim_store.go	closeHookWorkflowStore	raw-param	1
+cmd/gc/hook_claim_store.go	hookCity.openClaimStore	raw-result	2
+cmd/gc/hook_claim_store.go	hookClaimStoreOpener	raw-type	1
+cmd/gc/hook_claim_store.go	hookClaimStoreOps.claim	cap-assert	1
+cmd/gc/hook_claim_store.go	hookClaimStoreOps.reclaimStale	cap-assert	1
+cmd/gc/hook_claim_store.go	hookClaimStoreOps.release	cap-assert	1
+cmd/gc/hook_claim_store.go	hookClaimStoreOps.restampAdopted	cap-assert	1
+cmd/gc/hook_claim_store.go	hookClaimStoreOps.workflowStore	raw-result	1
+cmd/gc/hook_claim_store.go	hookOpenConfiguredStore	raw-result	1
+cmd/gc/hook_claim_store.go	hookWorkflowStoreHandle	raw-field	1
 cmd/gc/hook_identity.go	resolveExactSessionInfo	raw-param	1
 cmd/gc/hook_identity.go	resolveHookIdentity	raw-param	1
 cmd/gc/idle_nudge.go	clearClaimHold	raw-param	1
@@ -992,8 +1015,11 @@ cmd/gc/main.go	openScopeLocalFileStoreForCity	raw-result	1
 cmd/gc/main.go	openStoreAtForCity	raw-result	1
 cmd/gc/main.go	openStoreAtForCityWithAuthority	raw-result	1
 cmd/gc/main.go	openStoreAtForCityWithConfig	raw-result	1
-cmd/gc/main.go	openStoreResultAtForCityScoped	raw-result	4
+cmd/gc/main.go	openStoreAtForCityWithConfigAndBdOpener	raw-param	1
+cmd/gc/main.go	openStoreAtForCityWithConfigAndBdOpener	raw-result	1
+cmd/gc/main.go	openStoreResultAtForCityScopedWithDependencies	raw-result	5
 cmd/gc/main.go	sessionName	raw-param	1
+cmd/gc/main.go	storeOpenDependencies	raw-field	1
 cmd/gc/main.go	withDoltliteReadOptimization	raw-param	1
 cmd/gc/main.go	withDoltliteReadOptimization	raw-result	1
 cmd/gc/mcp_integration.go	resolveSessionMCPProjection	unwrap	1
@@ -1347,6 +1373,7 @@ cmd/gc/session_beads.go	closeFailedCreateBead	unwrap	1
 cmd/gc/session_beads.go	closeSeatIfRuntimeStopped	raw-param	1
 cmd/gc/session_beads.go	closedConfiguredNamedSessionBeadToReopen	raw-param	1
 cmd/gc/session_beads.go	configuredSessionNames	raw-param	1
+cmd/gc/session_beads.go	duplicateRetirementWorkSafe	raw-param	1
 cmd/gc/session_beads.go	findOpenSessionBeadBySessionName	raw-param	1
 cmd/gc/session_beads.go	loadOpenSessionInfos	raw-param	1
 cmd/gc/session_beads.go	loadSessionBeads	raw-param	1
@@ -1524,6 +1551,9 @@ cmd/gc/split_strict_seam.go	splitStrictWorkView	raw-param	1
 cmd/gc/split_strict_seam.go	splitStrictWorkView	raw-result	1
 cmd/gc/split_strict_seam.go	splitStrictWorkViews	raw-param	1
 cmd/gc/split_strict_seam.go	splitStrictWorkViews	raw-result	1
+cmd/gc/sqlite_work.go	openSQLiteWorkScope	raw-result	1
+cmd/gc/sqlite_work.go	openSQLiteWorkScopeWithPrefix	raw-result	1
+cmd/gc/sqlite_work.go	sqliteWorkDependencyRows	raw-param	2
 cmd/gc/store_health.go	collectStoreHealth	raw-param	1
 cmd/gc/store_health.go	listBeadsWithTimeout	raw-param	1
 cmd/gc/store_health.go	liveRowCount	cap-assert	1
@@ -1626,6 +1656,7 @@ cmd/gc/work_record_gate.go	evaluateWorkRecordCloseGate	raw-param	1
 cmd/gc/work_record_gate.go	runWorkRecordCloseGate	raw-param	1
 cmd/gc/work_release.go	releaseListed	mint	1
 cmd/gc/work_release.go	strandedClaimAlerts.seat	raw-param	1
+cmd/gc/work_release.go	strandedRepairHeldWork	raw-param	1
 cmd/gc/worker_handle.go	controllerKillRowCtx	raw-param	1
 cmd/gc/worker_handle.go	controllerKillSessionRow	raw-param	1
 cmd/gc/worker_handle.go	newWorkerSessionHandleForResolvedRuntimeWithConfig	raw-param	1
@@ -2440,7 +2471,7 @@ internal/sling/sling_attachment.go	sameStoreValue	raw-param	2
 internal/sling/sling_attachment.go	singleStoreAttachmentScope	raw-param	1
 internal/sling/sling_core.go	ensureSelectedSourceWorkflowStorePresent	raw-param	1
 internal/sling/sling_core.go	finalizeInStore	raw-param	1
-internal/sling/sling_core.go	reopenForReassignInStore	raw-param	1
+internal/sling/sling_core.go	preparedReassignment	raw-field	1
 internal/sling/sling_core.go	rollbackSourceWorkflowReplacement	raw-param	1
 internal/sling/sling_core.go	singleStoreSourceWorkflowRoots	raw-param	1
 internal/sling/sling_core.go	sourceWorkflowRoot	raw-field	1

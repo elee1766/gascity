@@ -14,13 +14,13 @@
     in
     {
       packages = forAllSystems (pkgs: rec {
-        gc = pkgs.buildGo126Module {
+        gc = pkgs.buildGo127Module {
           pname = "gc";
           version = "dev";
           src = self;
           subPackages = [ "cmd/gc" ];
           # Update with: nix build .#gc 2>&1 | grep got:
-          vendorHash = "sha256-9UDh2tFgXMvCjlC1X3Jq/5QSyexPg7/1VMHzYrFri1o=";
+          vendorHash = "sha256-EsYkvRNIV14ox/ryaGsnH7qr4rlafaUIy5w+GNNYuqI=";
           # Dolt's go-icu-regex links ICU through CGO.
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.icu ];

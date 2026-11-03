@@ -191,12 +191,12 @@ func claimDesiredPoolSlotInfo(cfg *config.City, cfgAgent *config.Agent, info ses
 }
 
 // idleFreshPoolSessionInfo permits a clean idle exit, never a crash or an operator hold.
-func idleFreshPoolSessionInfo(info session.Info, now time.Time) bool {
-	return info.PoolManaged && info.WakeMode == "fresh" && info.MetadataState == "asleep" &&
+func idleFreshPoolSessionInfo(info session.Info, cfgAgent *config.Agent, now time.Time) bool {
+	return cfgAgent != nil && cfgAgent.EffectiveWakeMode() == "fresh" &&
+		info.PoolManaged && info.WakeMode == "fresh" && info.MetadataState == "asleep" &&
 		(info.SleepReason == "idle" || info.SleepReason == "idle-timeout") &&
 		!info.Closed && !isNamedSessionInfo(info) && !isManualSessionInfo(info) &&
-		isPoolSessionSlotFreeableInfo(info, now) && strings.TrimSpace(info.WaitHold) == "" &&
-		!metadataTimeInFuture(info.HeldUntil, now) && !metadataTimeInFuture(info.QuarantinedUntil, now)
+		isPoolSessionSlotFreeableInfo(info, now) && !session.DispositionOfInfo(info).OperatorDormant(now)
 }
 
 // reusablePoolSessionInfo is the session.Info sibling of reusablePoolSessionBead.
@@ -240,7 +240,7 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		// may also reuse a clean idle exit: blocked claims can retain every
 		// slot, so waiting for slot retirement strands independent new work.
 		// Crash exits still require a fresh identity.
-		if !idleFreshPoolSessionInfo(info, bp.now()) &&
+		if !idleFreshPoolSessionInfo(info, cfgAgent, bp.now()) &&
 			(cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now())) {
 			return false
 		}

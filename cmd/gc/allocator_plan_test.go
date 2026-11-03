@@ -151,12 +151,16 @@ func TestAllocator_IdleFreshPoolReusesRetainedSeatsForDemand(t *testing.T) {
 		{"killed", []string{"sleep_reason", "killed"}},
 		{"drained", []string{"sleep_reason", "drained"}},
 		{"resume", []string{"wake_mode", "resume"}},
+		{"config-resume", nil},
 		{"manual", []string{"manual_session", "true"}},
 		{"dependency-only", []string{"dependency_only", "true"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			agent := allocPoolAgent("worker", 1)
 			agent.WakeMode = "fresh"
+			if tc.name == "config-resume" {
+				agent.WakeMode = "resume"
+			}
 			meta := append([]string{"wake_mode", "fresh", "sleep_reason", "idle"}, tc.meta...)
 			f := newAllocFixture(t, &config.City{Agents: []config.Agent{agent}}).
 				sessions(poolRow("gc-1", "worker", 1, "asleep", meta...)).demand("worker", "w-1")

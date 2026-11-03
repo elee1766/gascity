@@ -4618,7 +4618,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	)
 	awakeInput.RetainedPoolDemand = make(map[string]bool)
 	for _, info := range sessionInfos {
-		if _, selected := desiredState[info.SessionNameMetadata]; selected && idleFreshPoolSessionInfo(info, clk.Now()) {
+		if _, selected := desiredState[info.SessionNameMetadata]; selected && idleFreshPoolSessionInfo(info, config.FindAgent(cfg, info.Template), clk.Now()) {
 			awakeInput.RetainedPoolDemand[info.ID] = true
 		}
 	}

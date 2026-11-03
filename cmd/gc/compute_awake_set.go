@@ -383,7 +383,8 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			if filled >= count {
 				break
 			}
-			if bead.Template != template || !input.RetainedPoolDemand[bead.ID] || minActiveHardBlocked(bead, input.Now) {
+			if bead.Template != template || !input.RetainedPoolDemand[bead.ID] ||
+				bead.DependencyOnly || bead.Drained || minActiveHardBlocked(bead, input.Now) {
 				continue
 			}
 			if sessionHasAssignedWork(input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead), input.NamedSessions, bead) {

@@ -152,6 +152,7 @@ func TestAllocator_IdleFreshPoolReusesRetainedSeatsForDemand(t *testing.T) {
 		{"drained", []string{"sleep_reason", "drained"}},
 		{"resume", []string{"wake_mode", "resume"}},
 		{"manual", []string{"manual_session", "true"}},
+		{"dependency-only", []string{"dependency_only", "true"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			agent := allocPoolAgent("worker", 1)

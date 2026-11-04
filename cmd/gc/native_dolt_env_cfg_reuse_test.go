@@ -17,9 +17,8 @@ import (
 // after the open, on a reconnect where re-reading current config is the point.
 func TestOpenNativeStoreReusesTheLoadedCityConfig(t *testing.T) {
 	const (
-		// The open body lives in the scoped variant; the WithConfig and
-		// one-shot entry points both forward to it.
-		enclosing = "openStoreResultAtForCityScoped"
+		// The shared open body is behind the dependency-injection entry point.
+		enclosing = "openStoreResultAtForCityScopedWithDependencies"
 		field     = "OpenNativeStore"
 		callee    = "nativeDoltOpenEnvForScope"
 		wantArg   = "cfg"

@@ -509,7 +509,10 @@ List beads across all rigs, routed through the supervisor API when
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --all, and --format. --format=json emits
+Supports --label, --status, --all, --updated-since, and --format.
+--updated-since takes a duration (7d, 12h) or an RFC3339 timestamp and
+keeps beads updated at or after it; with --all it bounds the closed history
+read. --format=json emits
 JSON (API-path JSON includes _cache_age_s; fallback-path JSON omits
 it). The bare --json flag is reserved by the CLI's JSON-contract layer
 and is not wired for this command; use --format=json.
@@ -523,6 +526,7 @@ gc beads list [flags]
 ```
 gc beads list
 gc beads list --label ready-to-build
+gc beads list --all --updated-since 7d --format=json
 gc beads list --status open --format=json
 ```
 
@@ -532,6 +536,7 @@ gc beads list --status open --format=json
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
+| `--updated-since` | string |  | only beads updated within this duration (e.g. 7d, 12h) or since this RFC3339 timestamp |
 
 ## gc beads metadata-cas
 

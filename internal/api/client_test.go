@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
@@ -1859,9 +1860,13 @@ func TestListBeadsParams(t *testing.T) {
 	if got.All == nil || !*got.All {
 		t.Errorf("All = %v, want *true", got.All)
 	}
+	since := listBeadsParams(ListBeadsOpts{UpdatedSince: time.Date(2026, 11, 1, 8, 0, 0, 0, time.FixedZone("x", 3600))})
+	if since.UpdatedSince == nil || *since.UpdatedSince != "2026-11-01T07:00:00Z" {
+		t.Errorf("UpdatedSince = %v, want 2026-11-01T07:00:00Z", since.UpdatedSince)
+	}
 
 	empty := listBeadsParams(ListBeadsOpts{})
-	if empty.Status != nil || empty.Type != nil || empty.Label != nil || empty.Assignee != nil || empty.Rig != nil || empty.All != nil {
+	if empty.Status != nil || empty.Type != nil || empty.Label != nil || empty.Assignee != nil || empty.Rig != nil || empty.All != nil || empty.UpdatedSince != nil {
 		t.Errorf("empty opts set a non-nil filter: %+v", empty)
 	}
 }

@@ -35305,6 +35305,16 @@
               "description": "Include closed beads.",
               "type": "boolean"
             }
+          },
+          {
+            "description": "Return only beads updated at or after this RFC3339 timestamp (beads with no update time use their creation time).",
+            "explode": false,
+            "in": "query",
+            "name": "updated_since",
+            "schema": {
+              "description": "Return only beads updated at or after this RFC3339 timestamp (beads with no update time use their creation time).",
+              "type": "string"
+            }
           }
         ],
         "responses": {

@@ -850,6 +850,36 @@ func TestSQLiteStoreListAppliesResidualAssigneeFilterBeforeLimit(t *testing.T) {
 	}
 }
 
+// UpdatedSince selects on update time (created time when unset), so an old
+// bead with recent activity is kept and a recently created stale one is not.
+func TestSQLiteStoreListUpdatedSinceUsesUpdateTime(t *testing.T) {
+	opened, err := OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	store := opened.(*SQLiteStore)
+	t.Cleanup(func() { _ = store.CloseStore() })
+
+	cutoff := time.Unix(100, 0).UTC()
+	for _, b := range []Bead{
+		{ID: "gc-stale", Title: "stale", CreatedAt: time.Unix(10, 0).UTC(), UpdatedAt: time.Unix(20, 0).UTC()},
+		{ID: "gc-old-active", Title: "old but active", CreatedAt: time.Unix(11, 0).UTC(), UpdatedAt: time.Unix(150, 0).UTC()},
+		{ID: "gc-new", Title: "new", CreatedAt: time.Unix(120, 0).UTC()},
+	} {
+		if _, err := store.Create(b); err != nil {
+			t.Fatalf("Create %s: %v", b.ID, err)
+		}
+	}
+
+	rows, err := store.List(ListQuery{UpdatedSince: cutoff, Sort: SortCreatedAsc, Limit: 1})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "gc-old-active" {
+		t.Fatalf("List UpdatedSince rows = %#v, want only gc-old-active", rows)
+	}
+}
+
 // TestSQLiteStoreNoLeakOnDiscard is the goroutine-leak regression test for a
 // discarded store. Opening N stores with the retention sweeper enabled and
 // calling CloseStore on each must keep the goroutine count at ~baseline.

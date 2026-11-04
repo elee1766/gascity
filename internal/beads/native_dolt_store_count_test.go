@@ -154,6 +154,7 @@ func TestNativeDoltStoreCountUnsupportedShapes(t *testing.T) {
 		{name: "parentIDs not translated", query: ListQuery{AllowScan: true, ParentIDs: []string{"ga-parent"}}},
 		{name: "createdBefore precision", query: ListQuery{AllowScan: true, CreatedBefore: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}},
 		{name: "updatedBefore not translated", query: ListQuery{AllowScan: true, UpdatedBefore: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}},
+		{name: "updatedSince not translated", query: ListQuery{AllowScan: true, UpdatedSince: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)}},
 		{name: "limit cap is List-side", query: ListQuery{AllowScan: true, Limit: 5}},
 		{name: "seekAfter resolved Go-side", query: ListQuery{AllowScan: true, Sort: SortCreatedAsc, SeekAfter: &SeekBoundary{ID: "ga-1"}}},
 	}

@@ -87,7 +87,9 @@ on:
   merge_group:
     types: [checks_requested]
   push:
-    branches: [main]
+    # feat/sqlite-work-provider: the elee1766 fork's default branch, so its
+    # pushes save the runner caches below (default-branch pushes only).
+    branches: [main, feat/sqlite-work-provider]
   workflow_dispatch:
     inputs:
       rbe:
@@ -533,6 +535,21 @@ jobs:
         id: llvm
         uses: ./.github/actions/llvm-archive-cache
 
+      # A fork repository's own CI (mode local) has no rbe-west: its lanes
+      # read and write the fork owner's Aspect remote cache instead, through
+      # ~/.aspect/bazelrc, which ~/.bazelrc try-imports (setup-bazel's
+      # --bazelrc still comes after it). Bazel, its repository cache and the
+      # disk cache stay setup-bazel's. With no ASPECT_API_TOKEN (a PR from a
+      # fork of the fork) the rc enables no cache and the lane runs uncached.
+      - name: Aspect remote cache (fork repository)
+        if: needs.rbe.outputs.mode == 'local'
+        uses: aspect-build/setup-aspect@ebca96eb49ef58c00d4226de8bd3a0813507dd87 # v2026.38.3
+        with:
+          aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
+          bazelisk-cache: false
+          repository-cache: false
+          disk-cache: false
+
       # Lanes that execute here (modes cache and local, and a fork lane that
       # fell back to the read-only cache) run tests with .bazelrc's pinned
       # test PATH, so give them the Go the remote workers have at
@@ -890,7 +907,7 @@ jobs:
           [ -f "$LLVM_ARCHIVE_DIR/file" ] && fetched=true
           echo "fetched=$fetched" >> "$GITHUB_OUTPUT"
       - name: Save LLVM archive cache
-        if: always() && matrix.lane == 'unit' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.llvm-fetched.outputs.fetched == 'true' && steps.llvm.outputs.cache-hit != 'true'
+        if: always() && matrix.lane == 'unit' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.llvm-fetched.outputs.fetched == 'true' && steps.llvm.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.llvm.outputs.path }}
@@ -901,10 +918,10 @@ jobs:
           LLVM_ARCHIVE_DIR: ${{ steps.llvm.outputs.path }}
         run: rm -rf -- "$LLVM_ARCHIVE_DIR"
 
-      # Only a push to main that missed the exact key writes the runner cache
+      # Only a push to the default branch that missed the exact key writes the runner cache
       # (--repository_cache only, never the rc or credentials), from one lane.
       - name: Save Bazel runner cache
-        if: always() && matrix.lane == 'unit' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel.outcome == 'success' && steps.bazel.outputs.cache-hit != 'true'
+        if: always() && matrix.lane == 'unit' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.bazel.outcome == 'success' && steps.bazel.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bazel-ci-cache
@@ -914,7 +931,7 @@ jobs:
       # Bazelisk and Bazel"), from the same lane on the same pushes, so the
       # other lanes download neither.
       - name: Save Bazelisk and Bazel
-        if: always() && matrix.lane == 'unit' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.bazel.outcome == 'success' && steps.bazel.outputs.bin-cache-hit != 'true'
+        if: always() && matrix.lane == 'unit' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.bazel.outcome == 'success' && steps.bazel.outputs.bin-cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bazel-bin

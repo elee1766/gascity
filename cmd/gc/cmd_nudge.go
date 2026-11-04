@@ -2786,6 +2786,12 @@ func pollerSessionQuietEnough(target nudgeTarget, sp runtime.Provider, quiescenc
 	if quiescence <= 0 {
 		return true
 	}
+	// An ACP turn can stay quiet past the quiescence window (a long tool
+	// call) yet still be running; Nudge would then block for the whole busy
+	// timeout. ACP's snapshot is exact and non-blocking, so ask it first.
+	if acpTurnOutstanding(target, sp) {
+		return false
+	}
 	if obs.LastActivity != nil && !obs.LastActivity.IsZero() {
 		return time.Since(*obs.LastActivity) >= quiescence
 	}
@@ -2995,6 +3001,22 @@ func (t nudgeTarget) programHoldDeclared() bool {
 	}
 	arm, _ := config.ProgramStatusArmFor(t.cfg, t.resolved, t.sessionTransport())
 	return arm.HoldMidTurn
+}
+
+// acpTurnOutstanding reports whether target is an ACP session whose owning
+// provider reads a prompt still outstanding. Any other answer (not ACP, not
+// owned here, an error) is false: the caller's usual checks decide.
+func acpTurnOutstanding(target nudgeTarget, sp runtime.Provider) bool {
+	if sp == nil || target.sessionName == "" || target.sessionTransport() != "acp" {
+		return false
+	}
+	leaf, _, _ := runtime.ResolveBackend(sp, target.sessionName)
+	snap, ok := leaf.(runtime.IdleSnapshotProvider)
+	if !ok {
+		return false
+	}
+	idle, err := snap.SnapshotIdle(target.sessionName)
+	return err == nil && !idle
 }
 
 func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provider) bool {

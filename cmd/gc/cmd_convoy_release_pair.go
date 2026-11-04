@@ -722,14 +722,14 @@ func (r *releasePairRun) inventory(m *releasePairManifest) (releasePairInventory
 	}
 	routes := cliStorageRoutes(r.cityPath)
 	for _, class := range coordclass.Classes() {
-		if store, relocated := routes.storeFor(class); relocated {
+		if store, relocated := routes.storeFor(class); relocated { // residency:allow handover safety inventories every class binding, not a by-ID routing choice
 			if store == nil {
 				return inv, fmt.Errorf("reference class %s has no store", class)
 			}
 			views = append(views, convoyStoreView{path: "class:" + class.String(), store: store})
 		}
 	}
-	seenStores := []beads.Store{}
+	seenStores := []beads.Store{} // residency:allow identity-only deduplication of the exhaustive handover inventory, with no ownership precedence
 	seenRefs := map[string]bool{}
 	for _, view := range views {
 		inv.Scopes = append(inv.Scopes, view.path)

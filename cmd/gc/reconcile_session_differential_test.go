@@ -2311,10 +2311,12 @@ func TestIdleProbesPaceAPatrolApart(t *testing.T) {
 	}
 }
 
-// TestIdlePaceHoldsOnlyIdleProbes (C6a2 review 1a). Kills a pace that holds
-// a row's begin that would not probe: once the row's reason is no longer
-// idle (a no-wake-reason begin), its begin passes, though the row's last
-// idle probe is inside the patrol.
+// TestIdlePaceHoldsOnlyIdleProbes (C6a2 review 1a; SESS-621 no-wake idle
+// proof). Kills a pace that lets a row's probing begin through within the
+// patrol of its last probe. A no-wake-reason begin of an interactive session
+// proves its agent idle before draining, so it is an idle probe too: with a
+// probe of the same incarnation inside the patrol on every pass, it is paced
+// each time, never admitted.
 func TestIdlePaceHoldsOnlyIdleProbes(t *testing.T) {
 	dir := t.TempDir()
 	at := func(d time.Duration) string { return parityNow.Add(d).UTC().Format(time.RFC3339) }
@@ -2341,7 +2343,7 @@ func TestIdlePaceHoldsOnlyIdleProbes(t *testing.T) {
 			w.s.release(0)
 		}
 	}
-	if !slices.Contains(admitted, intentDrainBeginFresh+":gc-c") {
-		t.Fatalf("a no-wake-reason begin after an idle probe: admitted %v; want the begin", admitted)
+	if slices.Contains(admitted, intentDrainBeginFresh+":gc-c") {
+		t.Fatalf("a no-wake-reason begin inside its last idle probe's patrol: admitted %v; want it paced", admitted)
 	}
 }

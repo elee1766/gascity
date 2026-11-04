@@ -286,7 +286,14 @@ func (sc *sessionConn) checkPermissionParams(params requestPermissionParams) err
 }
 
 // errNudgeBusy reports that a nudge's wait for the turn to end timed out.
-var errNudgeBusy = errors.New("timed out waiting for idle")
+// Nothing was sent, so it is a runtime.ErrSessionBusy deferral: queued
+// delivery retries later without spending an attempt.
+var errNudgeBusy error = nudgeBusyError{}
+
+type nudgeBusyError struct{}
+
+func (nudgeBusyError) Error() string { return "timed out waiting for idle" }
+func (nudgeBusyError) Unwrap() error { return runtime.ErrSessionBusy }
 
 // waitNudgeable blocks until the turn is idle, like waitIdle, but refuses
 // with runtime.ErrNudgeRefusedPendingInteraction as soon as a permission

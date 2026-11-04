@@ -729,8 +729,8 @@ func TestNudgeBusyTimeoutWrapsErrNudgeBusy(t *testing.T) {
 	go func() { result <- f.p.Nudge(f.name, runtime.TextContent("queued")) }()
 	select {
 	case err := <-result:
-		if !errors.Is(err, errNudgeBusy) {
-			t.Fatalf("Nudge behind a busy turn = %v, want errNudgeBusy", err)
+		if !errors.Is(err, errNudgeBusy) || !errors.Is(err, runtime.ErrSessionBusy) {
+			t.Fatalf("Nudge behind a busy turn = %v, want errNudgeBusy wrapping runtime.ErrSessionBusy", err)
 		}
 		if want := fmt.Sprintf("agent %q busy, timed out waiting for idle", f.name); err.Error() != want {
 			t.Fatalf("Nudge error = %q, want %q", err, want)

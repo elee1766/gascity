@@ -61,7 +61,7 @@ func releaseDeadOwnerSourceClaims(cityStore beads.Store, rigStores map[string]be
 	if sourceStore == nil {
 		return nil
 	}
-	members, err := convoy.Members(sourceStore, convoyID, false, sourceStore)
+	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: beads.WorkStore{Store: sourceStore}}, convoyID, false)
 	if err != nil {
 		log.Printf("releaseDeadOwnerSourceClaims: listing input convoy %s of %s: %v", convoyID, step.ID, err)
 		return nil
@@ -114,7 +114,7 @@ func stepTracksSource(cityStore beads.Store, rigStores map[string]beads.Store, s
 	if sourceStore == nil {
 		return false, nil
 	}
-	members, err := convoy.Members(sourceStore, convoyID, false, sourceStore)
+	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: beads.WorkStore{Store: sourceStore}}, convoyID, false)
 	if err != nil {
 		return false, err
 	}

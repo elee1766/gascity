@@ -62,6 +62,14 @@ const (
 	// instruction naming a command this binary does not carry fails at the shell.
 	storageStopCommand = "gc stop"
 
+	// storageCoTenantStopCommand stops a co-tenant (another city that shares
+	// this city's store), with every other supervisor-hosted city, and keeps
+	// it registered. storageStopCommand would unregister it, and the
+	// shared-store check sees only registered cities. --wait returns once the
+	// supervisor has exited, so the cities' controller locks are free when the
+	// verb is run again.
+	storageCoTenantStopCommand = "gc supervisor stop --wait"
+
 	// storageFromBackupFlag names the second source the migrate verb takes:
 	// the retained-source backup a clear wrote, for re-copying a binding whose
 	// database is gone after the work store's copies were cleared.
@@ -212,6 +220,7 @@ operator arranges rather than something a program can observe.`,
 		newStorageRecoverCmd(repair, stdout, stderr),
 		newStorageRepairSequenceCmd(surface, stdout, stderr),
 		newStorageVouchBdCmd(surface, stdout, stderr),
+		newStorageRemoteStageCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -244,6 +253,7 @@ func newStorageMigrateCmd(surface storageCommandSurface, stdout, stderr io.Write
 		rigNames     []string
 		abandonRig   bool
 		fleetStopped bool
+		forced       []string
 	)
 	cmd := &cobra.Command{
 		Use:          surface.Verb,
@@ -311,6 +321,11 @@ half is an explicit operator attestation.`,
 				fmt.Fprintf(stderr, "gc %s %s: --%s narrows --%s and means nothing without it\n", surface.Namespace, surface.Verb, storageRigFlag, storageFromRigsFlag) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
+			force, err := parseStorageForce(forced)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc %s %s: %v\n", surface.Namespace, surface.Verb, err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			request, err := resolveStorageOperatorRequest()
 			if err != nil {
 				fmt.Fprintf(stderr, "gc %s %s: %v\n", surface.Namespace, surface.Verb, err) //nolint:errcheck // best-effort stderr
@@ -318,6 +333,7 @@ half is an explicit operator attestation.`,
 			}
 			request.FleetStopped = fleetStopped
 			request.FromBackup = fromBackup
+			request.Force = force
 			if abandonRig {
 				if !fromRigs || len(rigNames) != 1 {
 					fmt.Fprintf(stderr, "gc %s %s: --%s needs --%s and exactly one --%s\n", surface.Namespace, surface.Verb, storageAbandonRigStoreFlag, storageFromRigsFlag, storageRigFlag) //nolint:errcheck // best-effort stderr
@@ -343,6 +359,7 @@ half is an explicit operator attestation.`,
 		"with --"+storageFromRigsFlag+" --"+storageRigFlag+" X, record X's clear complete without its store, once the binding is proven to hold every row X's import recorded (for a rig store that is permanently gone)")
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false,
 		"attest that "+storageFleetStoppedAttestation)
+	addStorageForceFlag(cmd, &forced)
 	return cmd
 }
 
@@ -389,6 +406,8 @@ type storageOperatorRequest struct {
 	FleetStopped bool
 	// FromBackup selects the retained-source backup as the migration's source.
 	FromBackup bool
+	// Force carries the named hazards the operator attested (--force=).
+	Force storageForce
 }
 
 // resolveStorageOperatorRequest resolves the city and its configuration.
@@ -420,7 +439,7 @@ func resolveStorageOperatorRequest() (storageOperatorRequest, error) {
 // unless the city already converged and nothing is copied, the rig census,
 // because a bead this city's own scopes hold outside the work store is one the
 // copy will never see; and only then the copy itself.
-func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdout, stderr io.Writer) int {
+func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdout, stderr io.Writer) (code int) {
 	const logPrefix = "gc storage migrate"
 
 	// A split the boot gate would refuse to serve (a reserved HQ or rig
@@ -449,16 +468,32 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 
+	// The controller lock for the whole run, and the liveness checks under it
+	// (storage_verb_exclusion.go). The ping below is the advisory second check.
+	controllerLock, err := acquireStorageVerbExclusion(request, storageVerbScope{Splits: true})
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer controllerLock.Close() //nolint:errcheck // released last, after the guard
 	if pid := infraMigrationForeignControllerPID(request.CityPath); pid != 0 {
 		fmt.Fprintf(stderr, "%s: controller PID %d is live on this city and is still writing to the work store. Stop it (%s) and run this again\n", logPrefix, pid, storageStopCommand) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	shared, err := sharedWorkStoreRefusal(request.CityPath, request.Force)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer shared.Release() // the co-tenants stay stopped until the copy and the clear are done
 	if !request.FleetStopped {
 		fmt.Fprintf(stderr, "%s: pass --%s to attest that %s. This command proves the controller is stopped and cannot prove anything about the rest; a write that lands in the source after the copy is proven stays stranded there, and every later boot names it rather than losing it\n", //nolint:errcheck // best-effort stderr
 			logPrefix, storageFleetStoppedFlag, storageFleetStoppedAttestation)
 		return 1
 	}
-
+	// The guard, the last check that reads no store: a purge or a dry-run
+	// recover-stranded holds it without the controller lock, and a run it
+	// refuses must not start the provider under that holder, nor stop it.
 	guard, err := acquireStorageMigrationGuard(ctx, request.CityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -469,6 +504,25 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 			fmt.Fprintf(stderr, "%s: releasing the migration guard: %v\n", logPrefix, releaseErr) //nolint:errcheck // best-effort stderr
 		}
 	}()
+	// The maintenance window (storage_maintenance.go), once every check that
+	// reads no store has passed (the controller, the shared-store identity and
+	// its co-tenants' locks, the attestation, the guard), and before the first
+	// that opens the work store (the shared-store row check). Closed before
+	// the guard, the co-tenants and the lock are released.
+	window, err := openMigrationSource(controllerLock, request.CityPath, request.Cfg, logPrefix, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	defer window.closeReporting(logPrefix, stderr, &code)
+	if shared.Attested && !request.FromBackup {
+		if err := sharedStoreForeignRowRefusal(request.CityPath, request.Cfg); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
+	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(shared), stderr)
 
 	// No rig census here (S4b). A rig's graph rows no longer block the city
 	// cutover: the relic legs keep them readable, and `--from-rigs` moves
@@ -514,12 +568,19 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 			return 1
 		}
 	}
-	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s%s. Start the city with `gc start`.\n", //nolint:errcheck // best-effort stdout
-		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear), relowerSuccessClause(relowered))
+	// The window closes before the run reports: a provider its stop left
+	// running fails the run, and the report then says to start nothing.
+	window.closeReporting(logPrefix, stderr, &code)
+	startCity := " Start the city with `gc start`."
+	if code != 0 {
+		startCity = ""
+	}
+	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s%s.%s\n", //nolint:errcheck // best-effort stdout
+		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear), relowerSuccessClause(relowered), startCity)
 	if awaiting := rigsWithoutImportRecord(request.CityPath, request.Cfg, target); len(awaiting) > 0 {
 		fmt.Fprintf(stdout, "Rigs awaiting import (their graph rows stay readable until then): %s. Import them with `%s`.\n", strings.Join(awaiting, ", "), rigImportAllInstruction()) //nolint:errcheck // best-effort stdout
 	}
-	return 0
+	return code
 }
 
 // acquireStorageMigrationGuard takes the city's storage migration guard, with
@@ -736,6 +797,7 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 	}
 	fmt.Fprintf(stdout, "converged: yes\n  proven copy: %d bead(s)\n  stranded:    %d\n  retained copies: %d\n", //nolint:errcheck // best-effort stdout
 		manifest.Len(), len(gap.Stranded), len(gap.Retained))
+	purgeSettled := reportInfraPurgeLedger(target, stdout)
 	if len(gap.Stranded) > 0 {
 		fmt.Fprintf(stdout, "  stranded ids: %s\n", strings.Join(gap.Stranded, ", ")) //nolint:errcheck // best-effort stdout
 		// The exit code is the deploy gate; the remedy is what an operator does
@@ -750,8 +812,15 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 		}
 		// Split by why each id is stranded (infraStrandedAdvice): a held
 		// different bead and a presumed-reused row need a per-id choice, and
-		// only an absent row is told to copy it in.
-		fmt.Fprintf(stdout, "blocking invariant: %s\n", infraStrandedAdvice(gap.Stranded, gap.HeldDifferent, gap.PresumedReused)) //nolint:errcheck // best-effort stdout
+		// only an absent row is told to copy it in. While the purge ledger is
+		// unsettled, its own remedy above is the only one: recover-stranded
+		// refuses until then (infraPurgeUnsettledRefusal).
+		if purgeSettled {
+			fmt.Fprintf(stdout, "blocking invariant: %s\n", infraStrandedAdvice(gap.Stranded, gap.HeldDifferent, gap.PresumedReused)) //nolint:errcheck // best-effort stdout
+		}
+		return 1
+	}
+	if !purgeSettled {
 		return 1
 	}
 	note, notePresent, err := readInfraClearedNote(request.CityPath)
@@ -844,8 +913,11 @@ var openStorageScopeStore = openPhysicalScopeStore
 // census move infrastructure rows out of a rig ledger, so they read the rows
 // a runtime reader is never handed; under the split-strict test gate the
 // one-shot open would hand out the work view, which hides exactly those rows.
+// Inside a maintenance window it takes the window's configuration and native
+// transport (storage_maintenance.go).
 func openPhysicalScopeStore(storePath, cityPath string) (beads.Store, error) {
-	result, err := openStoreResultAtForCityScoped(storePath, cityPath, nil, gate.ModeUnset, false, false, false, false, nil)
+	cfg, transport := migrationWindowOpen(cityPath)
+	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, false, transport)
 	if err != nil {
 		return nil, err
 	}

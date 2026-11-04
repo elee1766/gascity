@@ -138,7 +138,7 @@ func (s hookClaimStoreOps) inputDone(ctx context.Context, dir string, env []stri
 		return "", false, err
 	}
 	defer closeHookClaimStore(store)
-	return workflowInputDone(store, candidate, identities)
+	return workflowInputDone(beads.WorkStore{Store: store}, candidate, identities)
 }
 
 func (s hookClaimStoreOps) skipDoneWorkflow(ctx context.Context, dir string, env []string, root string) error {
@@ -254,5 +254,5 @@ func (s hookClaimStoreOps) emitExecutionStepStartedTo(rec events.Recorder, step 
 		return
 	}
 	defer closeHookClaimStore(store)
-	_ = executionevent.EmitLifecycle(rec, store, events.ExecutionStepStarted, step, eventActor())
+	_ = executionevent.EmitLifecycle(rec, beads.GraphStore{Store: store}, events.ExecutionStepStarted, step, eventActor())
 }

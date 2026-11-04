@@ -186,7 +186,7 @@ var errRestampGraphResident = fmt.Errorf("graph-resident bead: %w", beads.ErrCon
 // the binding's.
 type hookClaimClassRoute struct {
 	// class is the raw binding store, needed by the lifecycle projector, which
-	// takes a beads.Store rather than the closed contract.
+	// takes a beads.GraphStore rather than the closed contract.
 	class beads.Store
 	graph storebinding.GraphStore
 
@@ -600,7 +600,8 @@ func (r *hookClaimClassRoute) emitExecutionStepStarted(step beads.Bead) {
 	if closer, ok := rec.(io.Closer); ok {
 		defer closer.Close() //nolint:errcheck // lifecycle events are best-effort
 	}
-	_ = executionevent.EmitLifecycle(rec, r.class, events.ExecutionStepStarted, step, eventActor())
+	// r.class is the binding, which holds the graph class on a relocated city.
+	_ = executionevent.EmitLifecycle(rec, beads.GraphStore{Store: r.class}, events.ExecutionStepStarted, step, eventActor())
 }
 
 // classRoutedHookClaimOps returns ops whose claim-time writes fall back to the
@@ -716,7 +717,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		if !route.knownResident(candidate.ID) {
 			return base.InputDone(ctx, dir, env, current, identities)
 		}
-		rootID, done, err := workflowInputDone(route.class, current, identities)
+		rootID, done, err := workflowInputDone(beads.WorkStore{Store: route.class}, current, identities)
 		if err == nil && rootID != "" {
 			route.resident[rootID] = true
 		}
@@ -868,7 +869,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
 		}
 		work := base.WorkflowStore(ctx, dir, env, rootID, "")
-		return workflowInputDoneAcross(route.class, work, candidate, identityCandidates)
+		return workflowInputDoneAcross(route.class, beads.WorkStore{Store: work}, candidate, identityCandidates)
 	}
 
 	ops.SkipDoneWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {

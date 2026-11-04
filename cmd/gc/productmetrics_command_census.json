@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 213,
+  "next_id": 214,
   "permanent_ids": [
     {
       "name": "help",
@@ -984,6 +984,22 @@
       "owner": "excluded",
       "mode": "hidden-private",
       "exclusion": "hidden-private"
+    },
+    {
+      "path": "gc convoy release-pair",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "convoy-release-pair",
+      "owner": "immediate",
+      "id": 213,
+      "canonical_identity": true
     },
     {
       "path": "gc convoy reopen-source",
@@ -4681,6 +4697,23 @@
       "owner": "excluded",
       "mode": "hidden-private",
       "exclusion": "hidden-private"
+    },
+    {
+      "path": "gc workflow release-pair",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": true,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "workflow-compat",
+      "notice_policy": "ineligible",
+      "hidden_exception": "workflow-compat",
+      "classification": "convoy-release-pair",
+      "owner": "immediate",
+      "id": 213,
+      "canonical_target": "gc convoy release-pair"
     },
     {
       "path": "gc workflow reopen-source",

@@ -243,6 +243,11 @@ var simCoverageAllowlist = map[string]string{
 	"effect:" + intentBaseline: "mc-i7efm: baseline",
 	// Every runtime the sim makes has a row first.
 	"arm:A1/armNoRow": "mc-i7efm: no-row runtime",
+	// No sim agent proves itself idle (the fake's WaitForIdle is
+	// unsupported unless a scenario configures it), so a no-wake begin
+	// never lands and A20 never signals it fresh (SESS-621);
+	// reconcile_effect_signal_test.go covers the effect.
+	"effect:" + intentSignalFresh: "SESS-621: idle-proved no-wake drains",
 }
 
 // simCoverageGaps are the registered keys the reports never reach and are

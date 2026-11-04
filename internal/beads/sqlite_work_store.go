@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 const (
 	// WorkLeaseExpiresMetadataKey is the durable deadline used by SQLite work claims.
-	WorkLeaseExpiresMetadataKey = "gc.work.lease_expires_at"
+	WorkLeaseExpiresMetadataKey = beadmeta.WorkLeaseExpiresMetadataKey
 	// WorkLeaseDuration is renewed by a successful owner heartbeat.
 	WorkLeaseDuration = 30 * time.Minute
 )

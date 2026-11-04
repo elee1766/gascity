@@ -30,8 +30,8 @@ var releasePairPhases = []string{"fence-step", "fence-source", "prepare-step", "
 
 const (
 	releasePairFenceLabel     = beadmeta.HoldMayorLabel
-	releasePairHandoverIDKey  = "gc.handover.id"
-	releasePairHandoverKey    = "gc.handover.phase"
+	releasePairHandoverIDKey  = beadmeta.HandoverIDMetadataKey
+	releasePairHandoverKey    = beadmeta.HandoverPhaseMetadataKey
 	releasePairInventoryLimit = 20000
 	releasePairExitUnknown    = 2
 )

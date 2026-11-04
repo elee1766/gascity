@@ -916,7 +916,7 @@ func retirementWorkHeld(b beads.Bead) bool {
 			return true
 		}
 	}
-	return b.Status == "blocked" || b.Metadata["gc.root_bead_id"] != "" || b.Metadata["gc.execution_routed_to"] != ""
+	return b.Status == "blocked" || b.Metadata[beadmeta.RootBeadIDMetadataKey] != "" || b.Metadata[beadmeta.ExecutionRoutedToMetadataKey] != ""
 }
 
 func namedSessionBeadWinsCanonicalRepair(candidate, incumbent beads.Bead, canonicalSessionName string) bool {

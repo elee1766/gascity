@@ -2351,7 +2351,7 @@ func (p *preparedReassignment) validateStandalone(opts SlingOpts, deps SlingDeps
 			return refuse("source has an explicit hold")
 		}
 	}
-	linkKeys := []string{beadmeta.MoleculeIDMetadataKey, "workflow_id", beadmeta.RootBeadIDMetadataKey, beadmeta.SourceBeadIDMetadataKey, beadmeta.InputConvoyIDMetadataKey, "gc.execution_routed_to", beadmeta.SessionIDMetadataKey, beadmeta.SessionIDCamelMetadataKey, beadmeta.SessionNameMetadataKey, beadmeta.SessionNameCamelMetadataKey}
+	linkKeys := []string{beadmeta.MoleculeIDMetadataKey, "workflow_id", beadmeta.RootBeadIDMetadataKey, beadmeta.SourceBeadIDMetadataKey, beadmeta.InputConvoyIDMetadataKey, beadmeta.ExecutionRoutedToMetadataKey, beadmeta.SessionIDMetadataKey, beadmeta.SessionIDCamelMetadataKey, beadmeta.SessionNameMetadataKey, beadmeta.SessionNameCamelMetadataKey}
 	linkKeys = append(linkKeys, beadmeta.SessionAffinityMetadataKeys...)
 	for _, key := range linkKeys {
 		if strings.TrimSpace(b.Metadata[key]) != "" {

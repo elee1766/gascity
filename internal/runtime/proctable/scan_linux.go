@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pidutil"
@@ -37,6 +38,17 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 // detectSubreaper is the user subreaper the empty-id scan counts as an
 // orphan parent (a systemd --user supervisor); a test sets its fixture's.
 var detectSubreaper = pidutil.DetectUserSubreaperPID
+
+// SetSubreaperForTesting supplies the adopter for a test's controlled procfs.
+func SetSubreaperForTesting(t testing.TB, pid int) {
+	t.Helper()
+	if scanRoot == "/proc" {
+		t.Fatal("inject a controlled procfs root before overriding its subreaper")
+	}
+	previous := detectSubreaper
+	detectSubreaper = func(int) int { return pid }
+	t.Cleanup(func() { detectSubreaper = previous })
+}
 
 // ScanBySessionIDSince scans for an exact session incarnation. Inspection
 // failures from processes proven to predate incarnationStartedAt do not make

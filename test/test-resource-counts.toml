@@ -220,6 +220,11 @@ resource = "slow_process_gate"
 calls = 1
 
 [[count]]
+path = "cmd/gc/cmd_convoy_release_pair_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "cmd/gc/cmd_convoy_test.go"
 resource = "environment"
 calls = 1
@@ -1231,6 +1236,11 @@ resource = "http_test_server"
 calls = 6
 
 [[count]]
+path = "cmd/gc/sqlite_work_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "cmd/gc/status_provider_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -1963,6 +1973,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/config/workquery_inprogress_federation_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/configedit/configedit_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -1971,6 +1986,11 @@ calls = 1
 path = "internal/convergence/condition_test.go"
 resource = "fixed_sleep"
 calls = 1
+
+[[count]]
+path = "internal/convtel/convtel_test.go"
+resource = "http_test_server"
+calls = 2
 
 [[count]]
 path = "internal/credentialprovider/credentialprovider_process_windows_test.go"

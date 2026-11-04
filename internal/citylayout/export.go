@@ -60,6 +60,7 @@ var defaultWorkDirExportExcludes = []string{
 	".gc/worktrees/**",
 	".gc/agents/**",
 	".gc/emergency/**",
+	".gc/handovers/**",
 	".gc/storage-served-binding.json",
 	".gc/storage-infra-cleared.json",
 	".gc/scope-ownership.json",

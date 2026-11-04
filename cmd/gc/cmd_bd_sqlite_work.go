@@ -12,13 +12,14 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
 const (
-	sqliteWorkNotesKey    = "gc.work.notes"
-	sqliteWorkCommentsKey = "gc.work.comments"
+	sqliteWorkNotesKey    = beadmeta.WorkNotesMetadataKey
+	sqliteWorkCommentsKey = beadmeta.WorkCommentsMetadataKey
 )
 
 type sqliteWorkComment struct {

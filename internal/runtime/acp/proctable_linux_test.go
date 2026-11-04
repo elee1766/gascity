@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -437,8 +438,28 @@ func TestFindRuntimesBySessionIDTracksPerSessionAcrossSessions(t *testing.T) {
 	// The empty-id scan is the orphan sweep's: only reparented roots
 	// (proctable.OrphanCandidate, mc-ygved), so the live agent, still this
 	// test's child, is not in it, and the dead session's escaped tool is.
-	var found []runtime.LiveRuntime
-	scanSnapshot(t, func() { found = findOnly(t, p, "") }, liveAgent, liveTool, deadAgent, deadTool)
+	parent, err := pidutil.ParentPID(deadTool)
+	if err != nil {
+		t.Fatalf("read escaped tool parent: %v", err)
+	}
+	// Bazel may adopt the orphan under its own ancestor subreaper.
+	if parent != 1 {
+		ancestor := os.Getpid()
+		for ancestor > 1 && ancestor != parent {
+			ancestor, err = pidutil.ParentPID(ancestor)
+			if err != nil {
+				t.Fatalf("read test ancestry: %v", err)
+			}
+		}
+		if ancestor != parent || parent == os.Getpid() {
+			t.Fatalf("escaped tool parent %d is neither init nor a strict test ancestor", parent)
+		}
+	}
+	proctable.SetScanRootForTesting(t, snapshotProcRoot(t, liveAgent, liveTool, deadAgent, deadTool))
+	if parent != 1 {
+		proctable.SetSubreaperForTesting(t, parent)
+	}
+	found := findOnly(t, p, "")
 	byPID := make(map[int]runtime.LiveRuntime, len(found))
 	for _, r := range found {
 		byPID[r.PID] = r

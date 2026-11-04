@@ -15,11 +15,11 @@ import (
 
 // Reclaim provenance stamped on a source bead whose dead owner was released.
 const (
-	sourceReclaimedFromMetadataKey = "gc.reclaimed_from"
-	sourceReclaimedAtMetadataKey   = "gc.reclaimed_at"
-	sourceReclaimedByMetadataKey   = "gc.reclaimed_with_step"
+	sourceReclaimedFromMetadataKey = beadmeta.ReclaimedFromMetadataKey
+	sourceReclaimedAtMetadataKey   = beadmeta.ReclaimedAtMetadataKey
+	sourceReclaimedByMetadataKey   = beadmeta.ReclaimedWithStepMetadataKey
 	// workLeaseExpiresMetadataKey is the SQLite work provider's claim lease deadline.
-	workLeaseExpiresMetadataKey = "gc.work.lease_expires_at"
+	workLeaseExpiresMetadataKey = beadmeta.WorkLeaseExpiresMetadataKey
 )
 
 // releaseDeadOwnerSourceClaims releases the source work a reclaimed workflow

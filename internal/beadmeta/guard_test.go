@@ -79,6 +79,7 @@ var excludedDirs = []string{
 	"internal/beadmeta",         // this package declares the vocabulary
 	"internal/events",           // gc.* event-type names (events.KnownEventTypes)
 	"internal/telemetry",        // gc.* metric/counter names
+	"internal/convtel",          // gc.* conversation-export attributes, not bead metadata
 	"internal/runtime/t3bridge", // t3bridge UI thread-metadata namespace
 	"internal/opjournal",        // op journal gc.op.* / gc.fact.* namespace; its codec is the only reader and writer
 	"internal/eventfact",        // event-fact gc.ev.* and projector-checkpoint gc.evproj.* namespaces; its codec is the only reader and writer

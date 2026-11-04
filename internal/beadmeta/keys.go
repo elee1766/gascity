@@ -217,6 +217,8 @@ const (
 	FormulaSourceMetadataKey             = "gc.formula_source"
 	GCExemptMetadataKey                  = "gc.gc_exempt"
 	Graphv2RootKeyMetadataKey            = "gc.graphv2_root_key"
+	HandoverIDMetadataKey                = "gc.handover.id"
+	HandoverPhaseMetadataKey             = "gc.handover.phase"
 	IdempotencyKeyMetadataKey            = "gc.idempotency_key"
 	InputConvoyIDMetadataKey             = "gc.input_convoy_id"
 	InstantiatingMetadataKey             = "gc.instantiating"
@@ -259,6 +261,9 @@ const (
 	PerDispatchModelMetadataKey         = "gc.per_dispatch_model"
 	RalphStepIDMetadataKey              = "gc.ralph_step_id"
 	ReasoningMetadataKey                = "gc.reasoning"
+	ReclaimedAtMetadataKey              = "gc.reclaimed_at"
+	ReclaimedFromMetadataKey            = "gc.reclaimed_from"
+	ReclaimedWithStepMetadataKey        = "gc.reclaimed_with_step"
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
 	ReviewGateMetadataKey               = "gc.review_gate"
@@ -364,7 +369,10 @@ const (
 	TruncatedMetadataKey           = "gc.truncated"
 	WorkBranchMetadataKey          = "gc.work_branch"
 	WorkCommitMetadataKey          = "gc.work_commit"
+	WorkCommentsMetadataKey        = "gc.work.comments"
 	WorkDirMetadataKey             = "gc.work_dir"
+	WorkLeaseExpiresMetadataKey    = "gc.work.lease_expires_at"
+	WorkNotesMetadataKey           = "gc.work.notes"
 	WorkOutcomeMetadataKey         = "gc.work_outcome"
 	WorkVerificationMetadataKey    = "gc.work_verification"
 	WorktreeBaseRefMetadataKey     = "gc.worktree_base_ref"
@@ -629,6 +637,8 @@ var KnownMetadataKeys = []string{
 	FormulaSourceMetadataKey,
 	GCExemptMetadataKey,
 	Graphv2RootKeyMetadataKey,
+	HandoverIDMetadataKey,
+	HandoverPhaseMetadataKey,
 	IdempotencyKeyMetadataKey,
 	InputConvoyIDMetadataKey,
 	InstantiatingMetadataKey,
@@ -662,6 +672,9 @@ var KnownMetadataKeys = []string{
 	PerDispatchModelMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,
+	ReclaimedAtMetadataKey,
+	ReclaimedFromMetadataKey,
+	ReclaimedWithStepMetadataKey,
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
 	ReviewGateMetadataKey,
@@ -715,7 +728,10 @@ var KnownMetadataKeys = []string{
 	TruncatedMetadataKey,
 	WorkBranchMetadataKey,
 	WorkCommitMetadataKey,
+	WorkCommentsMetadataKey,
 	WorkDirMetadataKey,
+	WorkLeaseExpiresMetadataKey,
+	WorkNotesMetadataKey,
 	WorkOutcomeMetadataKey,
 	WorkVerificationMetadataKey,
 	WorktreeBaseRefMetadataKey,

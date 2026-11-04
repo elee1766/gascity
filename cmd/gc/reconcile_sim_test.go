@@ -1407,6 +1407,11 @@ func (s *sim) quiesce() {
 			// A14's throttled attached-deferral re-stamp on a row that stays
 			// attached and drifted (CONTRACT v5.10m): no round of progress,
 			// nor a failure.
+		case (len(admitted) > 0 || changed) && s.unsupportedIdleProbes(before, after):
+			// C6a2 leaves unsupported idle probes unchanged on every patrol.
+			// Consume completed probes without admitting another patrol's effects.
+			s.p.drainSettlements(s.clk.Now())
+			done = rounds.quiet()
 		case (len(admitted) > 0 || changed) && s.pacedRetries(backoff, at, before, after):
 			var keys []rowKey
 			for _, r := range s.round {
@@ -1419,6 +1424,9 @@ func (s *sim) quiesce() {
 			s.failf("I10 I-bounded", "no fixed point %s after the last timer: admitted %v, store changed %t", s.clk.Now().Sub(bound)+slack, admitted, changed)
 		default:
 			done = rounds.quiet()
+		}
+		if done {
+			break
 		}
 		s.advance(simPatrol)
 		for _, l := range s.legs {
@@ -1503,6 +1511,35 @@ func (q *quiesceRounds) paced(keys []rowKey) (rowKey, bool) {
 type simResult struct {
 	it  intent
 	res settlement
+}
+
+// unsupportedIdleProbes recognizes only unchanged C6a2 probes independently
+// held by the simulation provider's default unsupported idle operation.
+func (s *sim) unsupportedIdleProbes(before, after map[string]beads.Bead) bool {
+	if len(s.round) == 0 || !maps.EqualFunc(before, after, sameBead) {
+		return false
+	}
+	for _, r := range s.round {
+		if r.it.Kind != intentDrainBeginFresh || r.res.Outcome != settledNoop || r.res.Cause != causeNotIdle {
+			return false
+		}
+		name := ""
+		for _, b := range after {
+			if b.ID == r.it.Key.ID {
+				name = b.Metadata["session_name"]
+			}
+		}
+		if name == "" {
+			return false
+		}
+		if _, configured := s.sp.WaitForIdleErrors[name]; configured {
+			return false
+		}
+		if len(s.sp.WaitForIdleSequence[name]) != 0 || s.sp.WaitForIdleGates[name] != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // pacedRetries is I10's paced retry (v5.9n): a quiescence round whose

@@ -1424,6 +1424,7 @@ export const zAgentPatch = z.object({
     MinActiveSessions: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).nullable(),
     MouseMode: z.string().nullable(),
     Name: z.string(),
+    Namepool: z.string().nullable(),
     Nudge: z.string().nullable(),
     OptionDefaults: z.record(z.string(), z.string()).optional(),
     OverlayDir: z.string().nullable(),

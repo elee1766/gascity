@@ -48,6 +48,12 @@ import (
 //     the landed claim to the city event log; it holds no candidate, no
 //     assignee and no policy of its own, and claimHookWork (the fenced worker
 //     pull path above) is the only place it is composed.
+//   - cmd_bd_sqlite_work.go is `gc bd update --claim` on the SQLite work
+//     store: the agent's own CLI claim of a bead it chose, like
+//     cmd_bd_by_id.go's bd passthrough. It rejects combined field edits.
+//   - hook_claim_store.go is the configured-store adapter claimHookWork
+//     composes (hookClaimOps.claim): the same fenced worker pull path, for
+//     providers that claim through beads.AssignmentClaimer.
 //
 // Adding a file here is a design decision about pull semantics; make it
 // deliberately.
@@ -59,6 +65,8 @@ var claimCASAllowedFiles = map[string]bool{
 	"class_store_emit.go":       true,
 	"bead_policy_store.go":      true,
 	"hook_claim_bead_events.go": true,
+	"cmd_bd_sqlite_work.go":     true,
+	"hook_claim_store.go":       true,
 }
 
 // claimCASMarkers are the two shapes a claim compare-and-swap takes in this

@@ -90,19 +90,28 @@ func TestClassRoutedWorkflowInputUsesGraphResidence(t *testing.T) {
 		t.Run(fmt.Sprintf("terminal=%v", terminal), func(t *testing.T) {
 			graph := newClaimRouteClassStore(t)
 			work := newClaimRouteClassStore(t)
+			// The root and its step live in the binding; the synthetic input
+			// convoy and the work it tracks stay in the work store
+			// (workflowInputDoneAcross).
 			for _, b := range []beads.Bead{
-				{ID: "gcg-200", Title: "input", Type: "convoy"},
 				{ID: "gcg-201", Title: "workflow", Type: "task", Metadata: map[string]string{beadmeta.InputConvoyIDMetadataKey: "gcg-200"}},
 				{ID: "gcg-202", Title: "delivery", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gcg-201"}},
-				{ID: "gcg-203", Title: "input member", Type: "task", ParentID: "gcg-200"},
 			} {
 				if _, err := graph.Create(b); err != nil {
 					t.Fatal(err)
 				}
 			}
+			for _, b := range []beads.Bead{
+				{ID: "gcg-200", Title: "input", Type: "convoy"},
+				{ID: "gcg-203", Title: "input member", Type: "task", ParentID: "gcg-200"},
+			} {
+				if _, err := work.Create(b); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if terminal {
 				status := "closed"
-				if err := graph.Update("gcg-203", beads.UpdateOpts{Status: &status}); err != nil {
+				if err := work.Update("gcg-203", beads.UpdateOpts{Status: &status}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -115,6 +124,11 @@ func TestClassRoutedWorkflowInputUsesGraphResidence(t *testing.T) {
 				},
 				SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, id string) error {
 					return skipDoneWorkflow(work, id)
+				},
+				// The work leg the input convoy is read from; without it the
+				// route opens the production store (a bd subprocess).
+				WorkflowStore: func(context.Context, string, []string, string, string) beads.Store {
+					return work
 				},
 			}, newClaimRouteFor(t, graph))
 			step, err := graph.Get("gcg-202")

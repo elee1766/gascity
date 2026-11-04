@@ -170,3 +170,5 @@ clear, `session.conversation_reset{reason:stale-key}`). While it is kept, the
 resume backstop (a refusal, or the third resume-shaped failure in a row) is
 its only automatic reset, whatever the provider; `gc session reset` is the
 explicit one.
+
+Session observability stamps must preserve an explicit session ID that differs from the resolved assignee. Changing claim identity requires a supported handover, not a session-name or work-directory refresh.

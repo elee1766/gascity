@@ -576,6 +576,11 @@ func TestSignaledStopIsNotA20s(t *testing.T) {
 // fresh begin with no own runtime read is no begin.
 func TestFreshBeginRestsOnTheRuntime(t *testing.T) {
 	sleep := func(e *selectionEntry) { e.Desired = desireSleep }
+	// A no-wake begin needs an idle proof (SESS-621); a non-interactive
+	// session has one by policy, so the rows below state the rest, not it.
+	idleProvable := func(w *World) {
+		w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Class: config.SessionSleepNonInteractive}}
+	}
 	for _, c := range []struct {
 		name  string
 		entry func(*selectionEntry)
@@ -585,7 +590,7 @@ func TestFreshBeginRestsOnTheRuntime(t *testing.T) {
 		{"orphaned", undesired(drainOrphaned), intentDrainBegin},
 	} {
 		var w *World
-		it, _ := decideDrain(t, nil, c.entry, func(got *World) { w = got })
+		it, _ := decideDrain(t, nil, c.entry, func(got *World) { idleProvable(got); w = got })
 		if it.Kind != c.kind {
 			t.Fatalf("%s: %+v, want a %s", c.name, it, c.kind)
 		}
@@ -593,7 +598,7 @@ func TestFreshBeginRestsOnTheRuntime(t *testing.T) {
 			t.Fatalf("%s: deferred %+v before admission, want it registered", c.name, deferred)
 		}
 	}
-	if it, _ := decideDrain(t, nil, sleep, func(w *World) { w.Obs = nil }); it.Kind != "" {
+	if it, _ := decideDrain(t, nil, sleep, func(w *World) { idleProvable(w); w.Obs = nil }); it.Kind != "" {
 		t.Fatalf("no own runtime read: %+v, want no fresh begin", it)
 	}
 }

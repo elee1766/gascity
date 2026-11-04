@@ -190,6 +190,15 @@ func claimDesiredPoolSlotInfo(cfg *config.City, cfgAgent *config.Agent, info ses
 	return claimPoolSlotWithConfigInfo(cfg, cfgAgent, info, used)
 }
 
+// idleFreshPoolSessionInfo permits a clean idle exit, never a crash or an operator hold.
+func idleFreshPoolSessionInfo(info session.Info, cfgAgent *config.Agent, now time.Time) bool {
+	return cfgAgent != nil && cfgAgent.EffectiveWakeMode() == "fresh" &&
+		info.PoolManaged && info.WakeMode == "fresh" && info.MetadataState == "asleep" &&
+		(info.SleepReason == "idle" || info.SleepReason == "idle-timeout") &&
+		!info.Closed && !isNamedSessionInfo(info) && !isManualSessionInfo(info) &&
+		isPoolSessionSlotFreeableInfo(info, now) && !session.DispositionOfInfo(info).OperatorDormant(now)
+}
+
 // reusablePoolSessionInfo is the session.Info sibling of reusablePoolSessionBead.
 // The SESSION side reads projected Info fields; the assigned-work slice stays raw
 // (ClassWork — beads.Bead is its domain object) via sessionBeadHasAssignedWorkInfo.
@@ -227,11 +236,12 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 		// max-session-age/killed without an honored kill fence — see
 		// isPoolSessionSlotFreeableInfo) one_shot exit carries no deliberate
 		// hold, so it is reused instead: the ordinary wake path retires the
-		// exit and remints the identity in place. Persistent pools keep
-		// today's behavior (a genuine crash gets a fresh identity rather than
-		// resuming a possibly-corrupt conversation); their freeable rows are
-		// closed by the reconciler's pool-slot close instead.
-		if cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now()) {
+		// exit and remints the identity in place. Fresh-mode persistent pools
+		// may also reuse a clean idle exit: blocked claims can retain every
+		// slot, so waiting for slot retirement strands independent new work.
+		// Crash exits still require a fresh identity.
+		if !idleFreshPoolSessionInfo(info, cfgAgent, bp.now()) &&
+			(cfgAgent.Lifecycle != config.AgentLifecycleOneShot || !isPoolSessionSlotFreeableInfo(info, bp.now())) {
 			return false
 		}
 		// A one_shot exit that still holds an open/in-progress assigned work

@@ -1879,7 +1879,7 @@ func wakeDemandOverridesSleepSuppression(
 	// holder none can, so leaving it idle-latched wedges the template: the
 	// asleep record satisfies the singleton's capacity and never starts
 	// (maintainer-city olivia, 2026-09-22).
-	if decision.Reason == "routed-demand" {
+	if decision.Reason == "routed-demand" || decision.Reason == "scaled:retained" {
 		return true
 	}
 	if poolDesired[template] > 0 && policy.Class == config.SessionSleepNonInteractive {
@@ -4616,6 +4616,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		cfg, cityPath, sessionInfos, poolDesired, namedSessionDemand, namedRoutedDemand, workSet, readyWaitSet,
 		assignedWorkBeads, reconcileOpts.readyAssignedFlags, wakeTargets, sp, clk.Now(),
 	)
+	awakeInput.RetainedPoolDemand = make(map[string]bool)
+	for _, info := range sessionInfos {
+		if _, selected := desiredState[info.SessionNameMetadata]; selected && idleFreshPoolSessionInfo(info, config.FindAgent(cfg, info.Template), clk.Now()) {
+			awakeInput.RetainedPoolDemand[info.ID] = true
+		}
+	}
 	awakeDecisions := ComputeAwakeSet(awakeInput)
 	wakeEvals := awakeSetToWakeEvals(awakeDecisions, awakeInput.SessionBeads)
 

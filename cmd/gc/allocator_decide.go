@@ -545,6 +545,12 @@ func (p *decidePass) awake() map[string]AwakeDecision {
 	}
 	input := newAwakeInputFromSnapshot(p.cfg, agentSuspended, infos, p.poolDesired, p.named.workReady,
 		p.named.routedDemand, nil, p.in.ReadyWaits, work, readyAssignedFlagsForBeads(p.in.Demand.ReadyAssigned, work, workRefs), p.in.Now)
+	input.RetainedPoolDemand = make(map[string]bool)
+	for _, info := range infos {
+		if p.selected[p.byID[info.ID]] != nil && idleFreshPoolSessionInfo(info, p.agentByTemplate(info.Template), p.in.Now) {
+			input.RetainedPoolDemand[info.ID] = true
+		}
+	}
 	if p.index != nil {
 		input.workIndex = newAwakeWorkIndex(input.WorkBeads)
 	}

@@ -25,6 +25,7 @@ type AwakeInput struct {
 	SessionBeads             []AwakeSessionBead
 	WorkBeads                []AwakeWorkBead // in_progress assigned work plus ready open assigned work
 	ScaleCheckCounts         map[string]int  // agent template → scale_check count
+	RetainedPoolDemand       map[string]bool // selected idle fresh-mode pool session IDs serving new demand
 	NamedSessionDemand       map[string]bool // named-session identity → routed/assigned work demand
 	NamedSessionRoutedDemand map[string]bool // named-session identity → pre-suppression routed demand on backing template (wake-only, see DesiredStateResult.NamedSessionRoutedDemand)
 	NamedSessionWorkQ        map[string]bool // named-session identity → bridge-carried work_query demand
@@ -378,6 +379,20 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		}
 		active := collectActiveBeads(input.SessionBeads, template, input.Now)
 		filled := countAssignedScaleSlotsIndexed(input.SessionBeads, input.WorkBeads, input.workIndex, input.NamedSessions, template)
+		for _, bead := range input.SessionBeads {
+			if filled >= count {
+				break
+			}
+			if bead.Template != template || !input.RetainedPoolDemand[bead.ID] ||
+				bead.DependencyOnly || bead.Drained || minActiveHardBlocked(bead, input.Now) {
+				continue
+			}
+			if sessionHasAssignedWork(input.workIndex.candidates(input.WorkBeads, input.NamedSessions, bead), input.NamedSessions, bead) {
+				continue
+			}
+			desired[key(bead)] = "scaled:retained"
+			filled++
+		}
 		for _, bead := range active {
 			if filled >= count {
 				break
@@ -662,6 +677,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			!isAlwaysNamedSession(input.NamedSessions, bead) &&
 			desired[name] != "assigned-work" && desired[name] != "min-active" &&
 			desired[name] != "reset-pending" &&
+			desired[name] != "scaled:retained" &&
 			desired[name] != "named-demand" && desired[name] != "routed-demand" &&
 			desired[name] != "work-query" && desired[name] != "explicit-wake" &&
 			!inManualGracePeriod(bead, input.ManualGracePeriod, input.Now) {

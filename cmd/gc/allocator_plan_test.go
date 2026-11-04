@@ -108,6 +108,71 @@ func TestDecideSmokePlansFreshPoolSessionsForDemand(t *testing.T) {
 	}
 }
 
+func TestAllocator_IdleFreshPoolReusesRetainedSeatsForDemand(t *testing.T) {
+	for _, demand := range []int{0, 1, 2} {
+		t.Run(fmt.Sprint(demand), func(t *testing.T) {
+			agent := allocPoolAgent("worker", 2)
+			agent.WakeMode = "fresh"
+			agent.SleepAfterIdle = "30m"
+			cfg := &config.City{Agents: []config.Agent{agent}}
+			old := allocNow.Add(-time.Hour).Format(time.RFC3339)
+			f := newAllocFixture(t, cfg).sessions(
+				poolRow("gc-1", "worker", 1, "asleep", "wake_mode", "fresh", "sleep_reason", "idle", "detached_at", old),
+				poolRow("gc-2", "worker", 2, "asleep", "wake_mode", "fresh", "sleep_reason", "idle", "detached_at", old),
+			)
+			for _, id := range []string{"gc-1", "gc-2"} {
+				f.in.Demand.AssignedWork = append(f.in.Demand.AssignedWork, beads.Bead{
+					ID: "held-" + id, Status: "blocked", Assignee: id, Labels: []string{"hold:external"},
+					Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+				})
+				f.in.Demand.AssignedStoreRefs = append(f.in.Demand.AssignedStoreRefs, "city")
+			}
+			work := []string{"w-1", "w-2"}
+			d := f.demand("worker", work[:demand]...).decide()
+			wakes := 0
+			for _, id := range []string{"gc-1", "gc-2"} {
+				if entryOf(t, d, id).Desired == desireWake {
+					wakes++
+				}
+			}
+			if wakes != demand || len(d.Plans) != 0 {
+				t.Fatalf("demand %d: wakes %d, new plans %d, trace %+v", demand, wakes, len(d.Plans), d.Trace)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		meta []string
+	}{
+		{"wait", []string{"wait_hold", "true"}},
+		{"held", []string{"held_until", allocNow.Add(time.Hour).Format(time.RFC3339)}},
+		{"quarantine", []string{"quarantined_until", allocNow.Add(time.Hour).Format(time.RFC3339)}},
+		{"crash", []string{"sleep_reason", "runtime-missing"}},
+		{"killed", []string{"sleep_reason", "killed"}},
+		{"drained", []string{"sleep_reason", "drained"}},
+		{"resume", []string{"wake_mode", "resume"}},
+		{"config-resume", nil},
+		{"manual", []string{"manual_session", "true"}},
+		{"dependency-only", []string{"dependency_only", "true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := allocPoolAgent("worker", 1)
+			agent.WakeMode = "fresh"
+			if tc.name == "config-resume" {
+				agent.WakeMode = "resume"
+			}
+			meta := append([]string{"wake_mode", "fresh", "sleep_reason", "idle"}, tc.meta...)
+			f := newAllocFixture(t, &config.City{Agents: []config.Agent{agent}}).
+				sessions(poolRow("gc-1", "worker", 1, "asleep", meta...)).demand("worker", "w-1")
+			f.in.Demand.AssignedWork = []beads.Bead{{ID: "held", Status: "blocked", Assignee: "gc-1", Labels: []string{"hold:external"}}}
+			f.in.Demand.AssignedStoreRefs = []string{"city"}
+			if e := entryOf(t, f.decide(), "gc-1"); e.Desired == desireWake && (tc.name != "manual" || e.Reason != "manual") {
+				t.Fatalf("%s seat must not serve anonymous demand: %+v", tc.name, e)
+			}
+		})
+	}
+}
+
 // Kills: plans from a suspended city (POOL-001, C2.1).
 func TestAllocator_CitySuspended_PlansNothing(t *testing.T) {
 	cfg := &config.City{

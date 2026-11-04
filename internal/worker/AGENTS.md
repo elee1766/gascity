@@ -339,3 +339,5 @@ enumerates stores itself.
 Hook input-ancestry reads and completed-workflow cleanup follow the candidate's proven physical store, not its logical rig or `gc.root_store_ref`; unresolved convoy members still prevent cleanup.
 
 Hook work operations and deferred event readback use the configured provider for the selected physical scope. Bind claim identity per adapter, preserve atomic ownership checks, and never fall back to another provider on a failed open. Lease recovery is optional: an unsupported lease capability must not block ordinary work, but an actual recovery error must remain visible.
+
+Native `gc bd show --json` exposes a CLI-only `revision` for work and graph records. Recovery writes must pass that positive token to `gc bd update --if-revision`; stale tokens fail without retrying against a newer record. Keep recovery policy outside the SDK and preserve existing hold and close gates.

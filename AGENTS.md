@@ -30,6 +30,7 @@ Read the area-specific instructions listed below before changing code.
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
 | Session creation or lifecycle from `cmd/gc` or `internal/api` | `internal/worker/AGENTS.md` |
+| `gc bd` recovery writes (`--if-revision`) | `internal/worker/AGENTS.md` |
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
 | `scripts/`, test runners, or git hooks | `scripts/AGENTS.md` |
 | Any test | `TESTING.md` |
@@ -224,8 +225,6 @@ becoming more useful as models improve — it becomes LESS useful instead.
 - `cobra` for CLI, `github.com/BurntSushi/toml` for config
 - Atomic file writes: temp file → `os.Rename`
 - No panics in library code — return errors
-- Native `gc bd show --json` exposes a CLI-only `revision` for work and graph records. Recovery writes must pass that positive token to `gc bd update --if-revision`; stale tokens fail without retrying against a newer record. Keep recovery policy outside the SDK and preserve existing hold and close gates.
-- Session observability stamps must preserve an explicit session ID that differs from the resolved assignee. Changing claim identity requires a supported handover, not a session-name or work-directory refresh.
 - Error messages include context: `fmt.Errorf("adding rig %q: %w", name, err)`
 - Don't swallow errors: no silently filled-in defaults, masked decode
   failures, or ignored timeouts.

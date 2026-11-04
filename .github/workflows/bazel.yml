@@ -58,8 +58,9 @@
 #     mode local: lanes execute on the runner with no rbe-cache lookups and
 #     no probes. The id, not the name, so an org rename never flips
 #     upstream into fork mode. Every job that runs in mode local runs on
-#     ubuntu-latest there (a fork has no Blacksmith: its jobs would queue
-#     for a day and never start), Blacksmith only in gastownhall;
+#     Ubicloud there (a fork has no Blacksmith: its jobs would queue for a
+#     day and never start): ubicloud-standard-8 for lanes,
+#     ubicloud-standard-2 for the rest. Blacksmith only in gastownhall;
 #     Fork PRs into gascity are unaffected (their runs have github.repository
 #     gastownhall/gascity), as is a contributor's own --config=fork-cache;
 #   - a fork run mints at most 4 rbe-fork certificates, one per lane:
@@ -140,8 +141,8 @@ jobs:
   rbe:
     name: execution mode
     # Blacksmith in gastownhall only; a fork repository's own CI has none
-    # (mode local, ubuntu-latest: the header).
-    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    # (mode local, ubicloud-standard-2: the header).
+    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubicloud-standard-2' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -424,8 +425,8 @@ jobs:
     # measurements per lane (ga-vnycm2.8, seeded runner cache) took 34-58 s
     # on 2 vCPU, 23-34 s on 4 and 15-19 s on 8. Unit and acceptance are the
     # critical lanes (ga-vnycm2.12). A fork repository's own CI (mode local)
-    # has no Blacksmith: ubuntu-latest.
-    runs-on: ${{ github.repository_owner_id != '255961667' && 'ubuntu-latest' || (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    # has no Blacksmith: every lane executes locally on ubicloud-standard-8.
+    runs-on: ${{ github.repository_owner_id != '255961667' && 'ubicloud-standard-8' || (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
     # The split-strict lane is non-blocking twice over: evidence-only (its
     # bazel step exits 0) and, should any other step of it fail, allowed to
     # fail as a job, so the required gate's needs.lane.result never sees it.
@@ -1096,7 +1097,7 @@ jobs:
     name: bazel / test cache report
     needs: [rbe, lane]
     if: always() && needs.rbe.result == 'success' && needs.rbe.outputs.lanes != '[]'
-    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubicloud-standard-2' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1286,7 +1287,7 @@ jobs:
   sync-check:
     name: BUILD files in sync
     needs: rbe
-    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubicloud-standard-2' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -1361,7 +1362,7 @@ jobs:
   worker-host:
     name: rbe worker host
     needs: rbe
-    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubicloud-standard-2' }}
     timeout-minutes: 25
     permissions:
       contents: read
@@ -1499,7 +1500,7 @@ jobs:
     name: bazel test (side-by-side)
     needs: [rbe, lane, sync-check, worker-host]
     if: always()
-    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository_owner_id == '255961667' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubicloud-standard-2' }}
     timeout-minutes: 5
     steps:
       - name: Evaluate

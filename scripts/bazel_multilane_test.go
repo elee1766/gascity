@@ -573,9 +573,9 @@ func TestBazelMultiLaneWorkflowShape(t *testing.T) {
 	// lane's client-side loading and analysis is CPU-bound (ga-vnycm2.8:
 	// 23-34 s on 4 vCPU, 15-19 s on 8), and every other mode executes here,
 	// or may (a fork lane's fallback to the read-only cache). A fork
-	// repository's own CI has no Blacksmith: ubuntu-latest
+	// repository's own CI has no Blacksmith: ubicloud-standard-8
 	// (TestBazelForkRepositoryFromEventContext).
-	if want := "${{ github.repository_owner_id != '" + gastownhallOwnerID + "' && 'ubuntu-latest' || (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
+	if want := "${{ github.repository_owner_id != '" + gastownhallOwnerID + "' && 'ubicloud-standard-8' || (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}"; lane.RunsOn != want {
 		t.Errorf("lane runs-on = %q, want %q", lane.RunsOn, want)
 	}
 
@@ -1152,7 +1152,8 @@ var forkRepoEventCases = []struct {
 // whatever its owner's name, and gastownhall's own runs stay upstream after
 // an org rename (the owner's id decides). Upstream, every job runs on
 // Blacksmith; in a fork (no Blacksmith), every job that can run in mode
-// local runs on ubuntu-latest, or it would queue for a day and never start.
+// local runs on Ubicloud, or it would queue for a day and never start:
+// lanes on ubicloud-standard-8, the rest on ubicloud-standard-2.
 func TestBazelForkRepositoryFromEventContext(t *testing.T) {
 	wf := readMultiLaneWorkflow(t)
 	decide := multiLaneRBEStep(t, wf, "decide")
@@ -1209,8 +1210,12 @@ func TestBazelForkRepositoryFromEventContext(t *testing.T) {
 				if c.upstream && !strings.HasPrefix(got, "blacksmith-") {
 					t.Errorf("%s: job %s (lane %s) runs-on %q, want a Blacksmith label upstream", c.name, id, lane, got)
 				}
-				if !c.upstream && got != "ubuntu-latest" {
-					t.Errorf("%s: job %s (lane %s) runs-on %q in mode %s, want ubuntu-latest (no Blacksmith in a fork)", c.name, id, lane, got, mode)
+				want := "ubicloud-standard-2"
+				if id == "lane" {
+					want = "ubicloud-standard-8"
+				}
+				if !c.upstream && got != want {
+					t.Errorf("%s: job %s (lane %s) runs-on %q in mode %s, want %s (no Blacksmith in a fork)", c.name, id, lane, got, mode, want)
 				}
 			}
 		}

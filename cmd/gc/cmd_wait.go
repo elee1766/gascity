@@ -1201,13 +1201,25 @@ func prepareWaitWakeStateHooked(sessFront *sessionpkg.Store, dependencies waitDe
 			}
 		}
 		if wait.ContinuationStale(sessionInfo) {
-			if err := sessFront.CancelWait(wait.ID, now, "continuation-stale"); err != nil {
-				return nil, err
+			// A deps wait watches beads, not a conversation: an open session's
+			// new continuation still owes it the reminder, so it follows the
+			// session to the new epoch instead of being canceled.
+			if wait.Kind == "deps" && !sessionInfo.Closed {
+				if err := sessFront.RebindWaitEpoch(wait.ID, sessionInfo.ContinuationEpoch); err != nil {
+					return nil, err
+				}
+				wait.RegisteredEpoch = sessionInfo.ContinuationEpoch
+				wait.RegisteredResetPending = false
+				wait.NudgeID = ""
+			} else {
+				if err := sessFront.CancelWait(wait.ID, now, "continuation-stale"); err != nil {
+					return nil, err
+				}
+				if err := clearHold(sessFront, sessionID); err != nil {
+					return nil, err
+				}
+				continue
 			}
-			if err := clearHold(sessFront, sessionID); err != nil {
-				return nil, err
-			}
-			continue
 		}
 		if sessionInfo.Closed {
 			if err := sessFront.CancelWait(wait.ID, now, "session-closed"); err != nil {

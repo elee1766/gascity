@@ -1545,6 +1545,72 @@ func TestPrepareWaitWakeState_CancelsStaleEpochWaitForClosedSession(t *testing.T
 	}
 }
 
+func TestPrepareWaitWakeState_RebindsDepsWaitToNewEpochOfOpenSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "2",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	dep, err := store.Create(beads.Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("create dep: %v", err)
+	}
+	waitBead, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStatePending,
+			"dep_ids":          dep.ID,
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"nudge_id":         "wait-old-1-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+
+	if _, err := prepareWaitWakeState(store, time.Now().UTC()); err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	updated, err := store.Get(waitBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(wait): %v", err)
+	}
+	if updated.Status == "closed" || updated.Metadata["state"] != waitStatePending {
+		t.Fatalf("wait status/state = %q/%q, want open/pending", updated.Status, updated.Metadata["state"])
+	}
+	if got := updated.Metadata["registered_epoch"]; got != "2" {
+		t.Fatalf("registered_epoch = %q, want 2", got)
+	}
+	if got := updated.Metadata["nudge_id"]; got != "" {
+		t.Fatalf("nudge_id = %q, want cleared", got)
+	}
+
+	if err := store.Close(dep.ID); err != nil {
+		t.Fatalf("close dep: %v", err)
+	}
+	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepareWaitWakeState after dep close: %v", err)
+	}
+	if !readyWaitSet[sessionBead.ID] {
+		t.Fatalf("readyWaitSet = %#v, want session %s ready", readyWaitSet, sessionBead.ID)
+	}
+}
+
 func TestPrepareWaitWakeState_ProcessesOpenSessionWaitsWithoutGlobalWaitList(t *testing.T) {
 	base := beads.NewMemStore()
 	store := waitGlobalListOmitStore{Store: base}
@@ -4889,6 +4955,16 @@ func (fx *resetWindowFixture) requireReady(stage string) {
 	}
 }
 
+func (fx *resetWindowFixture) requireRebound(stage, epoch string) {
+	fx.t.Helper()
+	fx.requireNotCanceled(stage)
+	b := fx.wait()
+	if b.Metadata["registered_epoch"] != epoch || b.Metadata["registered_reset_pending"] != "" {
+		fx.t.Fatalf("%s: registered_epoch=%q registered_reset_pending=%q, want %q with no reset flag",
+			stage, b.Metadata["registered_epoch"], b.Metadata["registered_reset_pending"], epoch)
+	}
+}
+
 func (fx *resetWindowFixture) requireCanceled(stage, reason string) {
 	fx.t.Helper()
 	b := fx.wait()
@@ -4934,7 +5010,9 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 			},
 		},
 		{
-			name: "control/registered-before-reset-is-stale",
+			// A deps wait watches beads, so an unflagged wait the start makes
+			// stale follows the open session to the new epoch.
+			name: "control/registered-before-reset-rebinds",
 			run: func(fx *resetWindowFixture) {
 				fx.register()
 				fx.requestReset()
@@ -4942,11 +5020,14 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 				fx.requireNotCanceled("inside the reset window")
 				fx.start(3)
 				fx.wakePass()
-				fx.requireCanceled("after the start", "continuation-stale")
+				fx.requireRebound("after the start", "3")
+				fx.closeDep()
+				fx.wakePass()
+				fx.requireReady("after the dep closed")
 			},
 		},
 		{
-			name: "flagged-wait-is-stale-after-second-reset",
+			name: "flagged-wait-rebinds-after-second-reset",
 			run: func(fx *resetWindowFixture) {
 				fx.requestReset()
 				fx.register()
@@ -4958,7 +5039,7 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 				fx.requireNotCanceled("inside the second reset window")
 				fx.start(4)
 				fx.wakePass()
-				fx.requireCanceled("after the second start", "continuation-stale")
+				fx.requireRebound("after the second start", "4")
 			},
 		},
 		{

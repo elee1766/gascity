@@ -223,6 +223,8 @@
               "runtime-workdir-export",
               "agent-is-foreign",
               "storage-vouch-bd",
+              "storage-remote-stage-mark",
+              "storage-remote-stage-unmark",
               "convoy-release-pair"
             ]
           },

@@ -58,6 +58,14 @@ func TestPollerSessionIdleEnoughUsesACPIdleWait(t *testing.T) {
 	if pollerSessionIdleEnough(target, sp, 20*time.Millisecond, noActivity) {
 		t.Fatal("pollerSessionIdleEnough = true while an ACP prompt is outstanding")
 	}
+	// A quiet turn (a long tool call) leaves an old activity stamp; the
+	// outstanding prompt still makes it busy, so delivery must not block
+	// for the busy timeout behind it.
+	stale := time.Now().Add(-time.Hour)
+	acpTarget := nudgeTarget{sessionName: name, transport: "acp"}
+	if pollerSessionIdleEnough(acpTarget, sp, 20*time.Millisecond, worker.LiveObservation{LastActivity: &stale}) {
+		t.Fatal("pollerSessionIdleEnough = true for a quiet but outstanding ACP turn")
+	}
 }
 
 // TestACPNoWakeDrainRequiresIdleTurn exercises the drain transaction through

@@ -120,7 +120,7 @@ func TestClassRoutedWorkflowInputUsesGraphResidence(t *testing.T) {
 					return work.Get(id)
 				},
 				InputDone: func(_ context.Context, _ string, _ []string, b beads.Bead, ids []string) (string, bool, error) {
-					return workflowInputDone(work, b, ids)
+					return workflowInputDone(beads.WorkStore{Store: work}, b, ids)
 				},
 				SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, id string) error {
 					return skipDoneWorkflow(work, id)

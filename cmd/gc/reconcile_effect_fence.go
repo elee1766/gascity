@@ -151,15 +151,21 @@ func (p *effectPass) readSignalWork(row session.Info, it intent) *txWork {
 }
 
 // provedIdle requires a current idle observation and the existing activity
-// timestamp check. TimedOnly runtimes prove no active protocol turn, not
-// interactive sleep eligibility. A cross-process activity stamp can lag;
-// these checks do not atomically exclude a turn starting after observation.
+// timestamp check. It is recorded as an idle proof (runtime.ShadowIdleProof).
 func provedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow time.Time) bool {
-	if resolveSleepCapability(leaf, name) == runtime.SessionSleepCapabilityTimedOnly {
-		tp, ok := leaf.(runtime.TurnFenceProvider)
-		if !ok {
-			return false
-		}
+	return runtime.ShadowIdleProof(ctx, leaf, name, func(ctx context.Context) bool {
+		return legacyProvedIdle(ctx, leaf, name, passNow)
+	})
+}
+
+// legacyProvedIdle is provedIdle's proof. TimedOnly runtimes with a turn fence
+// prove no active protocol turn, not interactive sleep eligibility; other
+// runtimes prove idle through WaitForIdle. A cross-process activity
+// stamp can lag; these checks do not atomically exclude a turn starting after
+// observation.
+func legacyProvedIdle(ctx context.Context, leaf runtime.Provider, name string, passNow time.Time) bool {
+	tp, fenced := leaf.(runtime.TurnFenceProvider)
+	if fenced && resolveSleepCapability(leaf, name) == runtime.SessionSleepCapabilityTimedOnly {
 		idle, read := boundedProbeCtx(ctx, func(probeCtx context.Context) bool {
 			turn, err := tp.ObserveTurn(probeCtx, name)
 			return err == nil && !turn.Active()

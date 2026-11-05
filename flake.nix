@@ -20,7 +20,7 @@
           src = self;
           subPackages = [ "cmd/gc" ];
           # Update with: nix build .#gc 2>&1 | grep got:
-          vendorHash = "sha256-EsYkvRNIV14ox/ryaGsnH7qr4rlafaUIy5w+GNNYuqI=";
+          vendorHash = "sha256-VDY/eROoiXKjLXLMLLpruc9iPtAKjGnYQDnRJ3mOEZw=";
           # Dolt's go-icu-regex links ICU through CGO.
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.icu ];

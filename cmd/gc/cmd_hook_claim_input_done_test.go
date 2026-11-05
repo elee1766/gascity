@@ -216,6 +216,31 @@ func TestWorkflowInputDoneFalseWhenMemberHeldBySessionIDOnlyProvenance(t *testin
 	}
 }
 
+// A workflow re-routed to another pool together with its source, where a
+// different seat of that pool claimed the source, is still this lane's work
+// (gci-424961: account#731 moved review-sonnet -> routing.review).
+func TestWorkflowInputDoneFalseWhenMemberClaimedBySamePoolSeat(t *testing.T) {
+	store, root, step := seedDoneWorkflow(t, "open")
+	members, err := convoy.MembersIn(convoy.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata[beadmeta.InputConvoyIDMetadataKey], true)
+	if err != nil || len(members) != 1 {
+		t.Fatalf("convoy.Members = %d, %v; want 1 member", len(members), err)
+	}
+	if err := store.Update(members[0].ID, beads.UpdateOpts{
+		Status:   strPtr("in_progress"),
+		Assignee: strPtr("gcg-session-3f62"),
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"},
+	}); err != nil {
+		t.Fatalf("update work: %v", err)
+	}
+	_, done, err := workflowInputDone(beadstest.Work(store), step, []string{"gcg-session-9105"})
+	if err != nil {
+		t.Fatalf("workflowInputDone: %v", err)
+	}
+	if done {
+		t.Fatal("done = true for a member claimed by another seat of the workflow's own route, want false")
+	}
+}
+
 func TestWorkflowInputDoneFalseWhenMemberAssignedToIdentityCandidate(t *testing.T) {
 	store, root, _ := seedDoneWorkflow(t, "handed_off")
 	convoyID := root.Metadata[beadmeta.InputConvoyIDMetadataKey]

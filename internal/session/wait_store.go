@@ -286,9 +286,9 @@ func (s *Store) MarkWaitReadyForRedelivery(id, nextAttempt string, now time.Time
 // the old epoch is fenced off by its continuation epoch.
 func (s *Store) RebindWaitEpoch(id, epoch string) error {
 	return s.store.SetMetadataBatch(id, map[string]string{
-		"registered_epoch":           epoch,
+		"registered_epoch":            epoch,
 		waitRegisteredResetPendingKey: "",
-		"nudge_id":                   "",
+		"nudge_id":                    "",
 	})
 }
 

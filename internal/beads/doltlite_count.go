@@ -147,7 +147,7 @@ func doltliteCountSupported(query ListQuery) bool {
 	if query.ParentID != "" {
 		return false
 	}
-	if !query.CreatedBefore.IsZero() || !query.UpdatedBefore.IsZero() {
+	if !query.CreatedBefore.IsZero() || !query.UpdatedBefore.IsZero() || !query.UpdatedSince.IsZero() {
 		return false
 	}
 	// The compound (created_at, id) seek boundary is resolved Go-side (to keep

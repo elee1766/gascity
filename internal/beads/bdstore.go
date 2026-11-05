@@ -3085,7 +3085,7 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if serverQuery.Sort == SortCreatedAsc || clientFilteredAssignees {
 		return true
 	}
-	if len(serverQuery.Metadata) > 0 || !serverQuery.CreatedBefore.IsZero() || !serverQuery.UpdatedBefore.IsZero() {
+	if len(serverQuery.Metadata) > 0 || !serverQuery.CreatedBefore.IsZero() || !serverQuery.UpdatedBefore.IsZero() || !serverQuery.UpdatedSince.IsZero() {
 		return true
 	}
 	// bd list exposes no compound (created_at, id) seek flag; the boundary is
@@ -3287,6 +3287,7 @@ func canApplyWispsServerLimit(query ListQuery) bool {
 	return query.Sort == SortDefault &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
+		query.UpdatedSince.IsZero() &&
 		len(query.Metadata) == 0 &&
 		len(query.IDs) == 0 &&
 		query.SeekAfter == nil

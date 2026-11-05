@@ -24,6 +24,9 @@ type BeadListInput struct {
 	Assignee string `query:"assignee" required:"false" doc:"Filter by assignee."`
 	Rig      string `query:"rig" required:"false" doc:"Filter by rig."`
 	All      bool   `query:"all" required:"false" doc:"Include closed beads."`
+	// UpdatedSince is RFC3339 rather than a duration so the all=true response
+	// cache key names an absolute window.
+	UpdatedSince string `query:"updated_since" required:"false" doc:"Return only beads updated at or after this RFC3339 timestamp (beads with no update time use their creation time)."`
 }
 
 // BeadReadyInput is the Huma input for GET /v0/city/{cityName}/beads/ready.

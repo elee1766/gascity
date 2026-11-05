@@ -421,6 +421,33 @@ func TestListQueryUpdatedBeforeMatchesReferenceTimestampBoundaries(t *testing.T)
 	}
 }
 
+func TestListQueryUpdatedSinceMatchesReferenceTimestampBoundaries(t *testing.T) {
+	cutoff := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		bead Bead
+		want bool
+	}{
+		{"updated before cutoff is excluded", Bead{ID: "a", Status: "closed", CreatedAt: cutoff.Add(-time.Hour), UpdatedAt: cutoff.Add(-time.Nanosecond)}, false},
+		{"updated equal cutoff matches", Bead{ID: "b", Status: "closed", CreatedAt: cutoff.Add(-time.Hour), UpdatedAt: cutoff}, true},
+		{"old bead updated after cutoff matches", Bead{ID: "c", Status: "closed", CreatedAt: cutoff.Add(-time.Hour), UpdatedAt: cutoff.Add(time.Nanosecond)}, true},
+		{"zero updated falls back to created before cutoff", Bead{ID: "d", Status: "open", CreatedAt: cutoff.Add(-time.Nanosecond)}, false},
+		{"zero updated falls back to created at cutoff", Bead{ID: "e", Status: "open", CreatedAt: cutoff}, true},
+	}
+
+	query := ListQuery{UpdatedSince: cutoff, IncludeClosed: true}
+	if !query.HasFilter() {
+		t.Fatal("HasFilter() = false, want true for UpdatedSince")
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := query.Matches(tt.bead); got != tt.want {
+				t.Fatalf("Matches() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestListQueryMatchesIgnoresUpdatedAtWhenUpdatedBeforeZero(t *testing.T) {
 	bead := Bead{
 		ID:        "future-update",

@@ -545,6 +545,20 @@ func TestDoltliteReadStoreBeforeFiltersRespectCutoff(t *testing.T) {
 	if got := testBeadIDs(updatedRows); !slices.Equal(got, []string{"gc-native-time-before"}) {
 		t.Fatalf("UpdatedBefore ids = %v, want [gc-native-time-before]; rows=%#v", got, updatedRows)
 	}
+
+	sinceRows, err := store.List(ListQuery{
+		Assignee:     "rig/native-time",
+		UpdatedSince: cutoff,
+		Sort:         SortCreatedAsc,
+		Limit:        1,
+		SkipLabels:   true,
+	})
+	if err != nil {
+		t.Fatalf("List UpdatedSince: %v", err)
+	}
+	if got := testBeadIDs(sinceRows); !slices.Equal(got, []string{"gc-native-time-after"}) {
+		t.Fatalf("UpdatedSince ids = %v, want [gc-native-time-after]; rows=%#v", got, sinceRows)
+	}
 }
 
 // TestDoltliteReadStoreBeforeFiltersToleratesRawTimeBind pins the production

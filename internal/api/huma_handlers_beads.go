@@ -7,6 +7,7 @@ import (
 	"log"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +62,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	// active work ledger guarantees, where the old integer offsets skipped or
 	// duplicated rows.
 	seek, err := beadListSeek(input.Cursor)
+	if err != nil {
+		return nil, err
+	}
+	updatedSince, err := beadListUpdatedSince(input)
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +151,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 				Label:         input.Label,
 				Assignee:      assignee,
 				IncludeClosed: input.All,
+				UpdatedSince:  updatedSince,
 				Live:          input.Status == "in_progress",
 				// Explicit sort: with SortDefault the CachingStore returns
 				// map-iteration order, so a bounded read truncated an
@@ -487,12 +493,15 @@ func beadListLegCount(ctx context.Context, store beads.Store, assignee string, i
 // NOT omitted for the same reason: a count taken over a narrower tier than the
 // list it bounds advertises a Total the walk can never reach.
 func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
+	// The handler already rejected an invalid updated_since.
+	updatedSince, _ := beadListUpdatedSince(input)
 	q := beads.ListQuery{
 		Status:        input.Status,
 		Type:          input.Type,
 		Label:         input.Label,
 		Assignee:      assignee,
 		IncludeClosed: input.All,
+		UpdatedSince:  updatedSince,
 		Live:          input.Status == "in_progress",
 		TierMode:      beads.FederatedReadTier,
 	}
@@ -500,6 +509,18 @@ func beadListCountQuery(assignee string, input *BeadListInput) beads.ListQuery {
 		q.AllowScan = true
 	}
 	return q
+}
+
+// beadListUpdatedSince parses the optional updated_since RFC3339 bound.
+func beadListUpdatedSince(input *BeadListInput) (time.Time, error) {
+	if input.UpdatedSince == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339, input.UpdatedSince)
+	if err != nil {
+		return time.Time{}, apierr.InvalidRequest.Msg("invalid updated_since timestamp: must be RFC3339, got " + strconv.Quote(input.UpdatedSince))
+	}
+	return t, nil
 }
 
 // readyFederationQuery is the ready query every leg of the ready federation is

@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -39,6 +40,9 @@ type beadFilters struct {
 	label  string
 	status string
 	all    bool
+	// updatedSince, when non-zero, keeps beads whose UpdatedAt (CreatedAt when
+	// unset) is at or after it.
+	updatedSince time.Time
 }
 
 // parseBeadFilters extracts --label, --status, and --all from args, returning
@@ -70,14 +74,19 @@ func parseBeadFilters(args []string) (beadFilters, []string) {
 }
 
 // filterBeads returns beads matching the given filters. Empty filter fields
-// match everything.
+// match everything. updatedSince is re-applied here because a supervisor that
+// predates the updated_since query parameter ignores it.
 func filterBeads(bs []beads.Bead, f beadFilters) []beads.Bead {
-	if f.label == "" && f.status == "" {
+	if f.label == "" && f.status == "" && f.updatedSince.IsZero() {
 		return bs
 	}
+	q := beads.ListQuery{UpdatedSince: f.updatedSince, IncludeClosed: true}
 	var out []beads.Bead
 	for _, b := range bs {
 		if f.status != "" && b.Status != f.status {
+			continue
+		}
+		if !f.updatedSince.IsZero() && !q.Matches(b) {
 			continue
 		}
 		if f.label != "" {

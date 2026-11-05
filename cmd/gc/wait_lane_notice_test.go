@@ -1151,7 +1151,8 @@ func startConsumingTheReset(t *testing.T, f *laneFixture, epoch int, token strin
 // start opens epoch 2, the reminder's notice keeps the attempt's key but is
 // scoped to epoch 2, so the lane delivers it there and the wait closes. A
 // second reset into epoch 3 before the lane delivers it still fences the
-// notice off, and the wait is canceled continuation-stale.
+// notice off. The deps wait follows the open session to epoch 3 and is ready
+// again, so its reminder is redelivered to the newest conversation.
 func TestWaitRegisteredDuringPendingResetNoticesTheConversationTheResetOpens(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -1162,7 +1163,7 @@ func TestWaitRegisteredDuringPendingResetNoticesTheConversationTheResetOpens(t *
 		lastError   string
 	}{
 		{name: "delivered after the start", arm: opjournal.ArmSucceeded, nudges: 1, state: waitStateClosed},
-		{name: "fenced off by a second reset", secondReset: true, arm: opjournal.ArmSkipped, state: waitStateCanceled, lastError: "continuation-stale"},
+		{name: "fenced off by a second reset", secondReset: true, arm: opjournal.ArmSkipped, state: waitStateReady},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLaneFixture(t, func(meta map[string]string) {
@@ -1217,8 +1218,8 @@ func TestWaitRegisteredDuringPendingResetNoticesTheConversationTheResetOpens(t *
 			if n := len(f.nudges()); n != tc.nudges {
 				t.Fatalf("runtime received %d nudges, want %d", n, tc.nudges)
 			}
-			if ready := prepareWaits(t, f); ready[f.id] {
-				t.Fatalf("ready-wait set = %v, want the session out of it", ready)
+			if ready := prepareWaits(t, f); ready[f.id] != tc.secondReset {
+				t.Fatalf("ready-wait set = %v, want the session in it %v", ready, tc.secondReset)
 			}
 			if got := waitNow(t, f, wait); got.State != tc.state {
 				t.Fatalf("wait state = %s, want %s", got.State, tc.state)

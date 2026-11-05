@@ -4955,6 +4955,16 @@ func (fx *resetWindowFixture) requireReady(stage string) {
 	}
 }
 
+func (fx *resetWindowFixture) requireRebound(stage, epoch string) {
+	fx.t.Helper()
+	fx.requireNotCanceled(stage)
+	b := fx.wait()
+	if b.Metadata["registered_epoch"] != epoch || b.Metadata["registered_reset_pending"] != "" {
+		fx.t.Fatalf("%s: registered_epoch=%q registered_reset_pending=%q, want %q with no reset flag",
+			stage, b.Metadata["registered_epoch"], b.Metadata["registered_reset_pending"], epoch)
+	}
+}
+
 func (fx *resetWindowFixture) requireCanceled(stage, reason string) {
 	fx.t.Helper()
 	b := fx.wait()
@@ -5000,7 +5010,9 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 			},
 		},
 		{
-			name: "control/registered-before-reset-is-stale",
+			// A deps wait watches beads, so an unflagged wait the start makes
+			// stale follows the open session to the new epoch.
+			name: "control/registered-before-reset-rebinds",
 			run: func(fx *resetWindowFixture) {
 				fx.register()
 				fx.requestReset()
@@ -5008,11 +5020,14 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 				fx.requireNotCanceled("inside the reset window")
 				fx.start(3)
 				fx.wakePass()
-				fx.requireCanceled("after the start", "continuation-stale")
+				fx.requireRebound("after the start", "3")
+				fx.closeDep()
+				fx.wakePass()
+				fx.requireReady("after the dep closed")
 			},
 		},
 		{
-			name: "flagged-wait-is-stale-after-second-reset",
+			name: "flagged-wait-rebinds-after-second-reset",
 			run: func(fx *resetWindowFixture) {
 				fx.requestReset()
 				fx.register()
@@ -5024,7 +5039,7 @@ func TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset(t *testing.T
 				fx.requireNotCanceled("inside the second reset window")
 				fx.start(4)
 				fx.wakePass()
-				fx.requireCanceled("after the second start", "continuation-stale")
+				fx.requireRebound("after the second start", "4")
 			},
 		},
 		{

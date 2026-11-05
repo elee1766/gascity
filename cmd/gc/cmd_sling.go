@@ -2436,7 +2436,7 @@ func printNudgePreview(w func(string), a config.Agent, cityName, cityPath string
 	// Dry-run session reads route to the session coordination-class store. Identity today.
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	sn := lookupSessionNameOrLegacy(sessStore, cityName, a.QualifiedName(), st)
-	running, err := workerSessionTargetRunningWithConfig("", sessStore, sp, cfg, sn)
+	running, err := workerSessionTargetRunningWithConfig(cityPath, sessStore, sp, cfg, sn)
 	if err == nil && running {
 		w("  Would nudge " + a.QualifiedName() + " (session " + sn + ").")
 		w("  Currently: running ✓")

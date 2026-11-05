@@ -120,7 +120,7 @@ while IFS="$(printf '\t')" read -r bead_id routed_to; do
     # Events are hints: recheck current state before sending or recording success.
     current="$(gc beads show "$bead_id" --format=json 2>/dev/null)" || continue
     if ! printf '%s\n' "$current" | jq -e --arg target "$routed_to" \
-        '.status == "open" and .metadata."gc.routed_to" == $target
+        '(.bead // .) | .status == "open" and .metadata."gc.routed_to" == $target
          and all((.labels // [])[]; startswith("hold:") | not)' >/dev/null 2>&1; then
         continue
     fi

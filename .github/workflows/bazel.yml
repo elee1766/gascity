@@ -677,6 +677,10 @@ jobs:
       # position. upload_strategy=local keeps the profile and exec log (the
       # BEP's local_file/uri fields) out of the farm CAS: both hold argv/env
       # values the ci-analytics extractor reads and redacts, never the farm.
+      # Mode local (a fork repository's own CI) has no farm: its remote
+      # cache is the fork owner's Aspect deployment, which needs the exec
+      # log uploaded (remote) for its cache and rebuild data. The local files
+      # are written either way.
       - name: bazel ${{ matrix.cmd }}
         id: test
         if: steps.worker-env.outputs.pin-moved != 'true'
@@ -688,13 +692,15 @@ jobs:
         run: |
           set -o pipefail
           read -r -a args <<<"$CMD"
+          upload=local
+          [ "$MODE" = local ] && upload=remote
           rc=0
           start=$(date +%s)
           bazel "${args[@]}" \
             --profile="$RUNNER_TEMP/bazel-profile.json" \
             --build_event_json_file="$RUNNER_TEMP/bazel-bep.json" \
             --execution_log_compact_file="$RUNNER_TEMP/bazel-exec.log.zst" \
-            --experimental_build_event_upload_strategy=local || rc=$?
+            --experimental_build_event_upload_strategy="$upload" || rc=$?
           echo "bazel / $LANE: exit $rc, $(( $(date +%s) - start ))s wall, mode $MODE" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$rc" -ne 0 ] && [ "$EVIDENCE_ONLY" = true ]; then
             echo "::warning title=$LANE is evidence-only::bazel exited $rc; not gating (integration until G3, split-strict until split is the default)"

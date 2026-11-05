@@ -2,6 +2,7 @@ package core
 
 import (
 	"io/fs"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +85,47 @@ func assertEventExecOrder(t *testing.T, orderFile, eventType, scriptBase string)
 // on bead.updated and runs the nudge-on-route script.
 func TestNudgeOnRouteOrder(t *testing.T) {
 	assertEventExecOrder(t, "nudge-on-route.toml", "bead.updated", "nudge-on-route.sh")
+}
+
+// TestNudgeOnRouteRechecksWrappedBead replays the beads-show envelope observed
+// on the live API when intake arrivals were silently skipped on 2026-11-04.
+func TestNudgeOnRouteRechecksWrappedBead(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		current string
+		want    int
+	}{
+		{"API envelope", `{"bead":{"id":"hq-intake-gcg-4999169","status":"open","labels":["intake-envelope"],"metadata":{"gc.routed_to":"intake"}},"_cache_age_s":0}`, 1},
+		{"flat fallback", `{"id":"hq-intake-gcg-4999169","status":"open","labels":["intake-envelope"],"metadata":{"gc.routed_to":"intake"}}`, 1},
+		{"held after event", `{"bead":{"status":"open","labels":["hold:human"],"metadata":{"gc.routed_to":"intake"}},"_cache_age_s":0}`, 0},
+		{"closed after event", `{"bead":{"status":"closed","metadata":{"gc.routed_to":"intake"}},"_cache_age_s":0}`, 0},
+		{"rerouted after event", `{"bead":{"status":"open","metadata":{"gc.routed_to":"other"}},"_cache_age_s":0}`, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin, log := fakeGCBin(t, `case "$1 $2" in
+"events --type") printf '%s\n' '{"payload":{"bead":{"id":"hq-intake-gcg-4999169","status":"open","labels":["intake-envelope"],"metadata":{"gc.routed_to":"intake"}}}}' ;;
+"beads show") printf '%s\n' '`+tc.current+`' ;;
+"session list") printf '%s\n' '{"sessions":[{"id":"gcg-session-worker","name":"intake-worker"}]}' ;;
+"session nudge") exit 0 ;;
+*) exit 1 ;;
+esac
+`)
+			keys := map[string]struct{}{"GC_CITY": {}, "GC_CITY_RUNTIME_DIR": {}, "GC_PACK_STATE_DIR": {}, "GC_BD_TRACE_JSON": {}}
+			env := []string{"GC_PACK_STATE_DIR=" + t.TempDir()}
+			for i := 0; i < 2; i++ {
+				if out, err := runPackScript(t, "assets/scripts/nudge-on-route.sh", bin, keys, env); err != nil {
+					t.Fatalf("route wake: %v\n%s", err, out)
+				}
+			}
+			data, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Count(string(data), "gc session nudge intake-worker "); got != tc.want {
+				t.Fatalf("nudges = %d, want %d after two deliveries:\n%s", got, tc.want, data)
+			}
+		})
+	}
 }
 
 // TestCascadeNudgeOnBlockerCloseOrder pins the cascade-nudge order's event

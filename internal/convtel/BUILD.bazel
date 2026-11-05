@@ -16,9 +16,13 @@ go_library(
 
 go_test(
     name = "convtel_test",
-    srcs = ["convtel_test.go"],
+    srcs = [
+        "convtel_test.go",
+        "testenv_import_test.go",
+    ],
     data = glob(["testdata/**"]),
     embed = [":convtel"],
+    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

@@ -1089,7 +1089,8 @@ func listBeadsParams(opts ListBeadsOpts) *genclient.GetV0CityByCityNameBeadsPara
 		params.All = &t
 	}
 	if !opts.UpdatedSince.IsZero() {
-		s := opts.UpdatedSince.UTC().Format(time.RFC3339)
+		// Nano keeps sub-second cutoffs; the stores compare at nanosecond precision.
+		s := opts.UpdatedSince.UTC().Format(time.RFC3339Nano)
 		params.UpdatedSince = &s
 	}
 	return params

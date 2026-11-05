@@ -91,6 +91,11 @@ const CANONICAL_HOLD_ACTORS: ReadonlyMap<string, string> = new Map([
 const HEARTBEAT_META_KEY = 'gc.last_heartbeat_at';
 const SESSION_ID_META_KEY = 'gc.session_id';
 
+// Formula workflow roots (metadata gc.kind=workflow) are intentionally
+// unassigned: their step and source beads carry the worker claims.
+const KIND_META_KEY = 'gc.kind';
+const WORKFLOW_KIND = 'workflow';
+
 /**
  * Why a bead needs the operator. `escalated` is an abnormally-blocked bead that
  * raised the escalation marker (a help-request / escalation); `ready-unclaimed`
@@ -260,7 +265,7 @@ function stalledRow(
   if (detail === null) return null;
   const ageMs = elapsedSince(bead.updated_at ?? bead.created_at, nowMs);
   const phrase =
-    ageMs === null ? `stalled — ${detail}` : `stalled ${formatElapsed(ageMs)} — ${detail}`;
+    ageMs === null ? `stalled — ${detail}` : `stalled ${formatElapsedFine(ageMs)} — ${detail}`;
   return {
     beadId: bead.id,
     reason: 'stalled',
@@ -276,7 +281,9 @@ function stalledDetail(
   sessions: readonly BeadAttentionSession[] | undefined,
   nowMs: number,
 ): string | null {
-  if (assignee.length === 0) return 'no assignee';
+  if (assignee.length === 0) {
+    return bead.metadata?.[KIND_META_KEY] === WORKFLOW_KIND ? null : 'no assignee';
+  }
   if (sessions === undefined) return null;
   const session = resolveSession(bead, sessions);
   if (session === undefined) {

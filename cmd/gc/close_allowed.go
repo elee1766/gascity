@@ -22,6 +22,7 @@ package main
 // A refusal is logged once per episode, with its cause.
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -83,6 +84,11 @@ func closePermitted(info sessionpkg.Info, gate closeGate, work bool) string {
 // sw, then the close-time re-read; a read that fails refuses (has-work, with
 // its error).
 func closeAllowed(sw *SeatWork, info sessionpkg.Info, why closeWhy) (string, error) {
+	if why.reason == strandedRepairCloseReason {
+		if held, err := strandedRepairHeldWork(sw, releaseScope(info, sw.Legs().cfg)); err != nil || held {
+			return causeHasWork, errors.Join(err, errStrandedRepairHeldWork)
+		}
+	}
 	if cause := closePermitted(info, why.gate, false); cause != "" || why.gate != closeGated && why.gate != closeFreeSlot {
 		return cause, nil
 	}

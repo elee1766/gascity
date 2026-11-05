@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/convtel"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -45,6 +47,9 @@ type Config struct {
 	// the in-flight turn before falling back to SIGINT. Default
 	// DefaultCancelTimeout.
 	CancelTimeout time.Duration
+	// ConversationExporter overrides the process-wide opt-in conversation
+	// exporter (convtel.Default). A test seam.
+	ConversationExporter *convtel.Exporter
 }
 
 func (c *Config) handshakeTimeout() time.Duration {
@@ -98,6 +103,7 @@ type Provider struct {
 	handshakeFunc func(context.Context, *sessionConn, string, []runtime.MCPServerConfig) error // test seam
 	dial          func(network, addr string, timeout time.Duration) (net.Conn, error)          // test seam
 	fenceChecked  func(name string)                                                            // test seam: runs between a fence check and its send
+	environFunc   func() []string                                                              // test seam: replaces execenv.Environ
 }
 
 // Compile-time check.
@@ -154,7 +160,34 @@ func (p *Provider) SupportsTransport(transport string) bool {
 // that name already exists or the handshake fails.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("acp start for %q: %w", name, err)
+	}
+	// Build environment: inherit parent env + apply overrides. Empty overrides
+	// withhold inherited variables, as they do for the other session runtimes.
+	// The parent env is read through execenv.Environ so a native beads store
+	// open projecting its scope's BEADS_* variables cannot leak into the session.
+	// It is read before the lifecycle lock and the startup reservation:
+	// execenv.Environ waits out an in-flight open and cannot be canceled, and
+	// Stop must not wait with it. A Stop during the wait finds no session, as
+	// one before Start does; a canceled ctx, checked again after the wait,
+	// abandons the start instead.
+	env := p.environ()
+	if len(cfg.Env) > 0 {
+		keys := make([]string, 0, len(cfg.Env))
+		for k := range cfg.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			env = envWithoutKey(env, k)
+			if cfg.Env[k] == "" {
+				continue
+			}
+			env = append(env, k+"="+cfg.Env[k])
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("acp start for %q: %w", name, err)
 	}
 	lock, err := p.lockLifecycle(name, true)
 	if err != nil {
@@ -255,23 +288,6 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		cmd.Dir = cfg.WorkDir
 	}
 
-	// Build environment: inherit parent env + apply overrides. Empty overrides
-	// withhold inherited variables, as they do for the other session runtimes.
-	env := os.Environ()
-	if len(cfg.Env) > 0 {
-		keys := make([]string, 0, len(cfg.Env))
-		for k := range cfg.Env {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			env = envWithoutKey(env, k)
-			if cfg.Env[k] == "" {
-				continue
-			}
-			env = append(env, k+"="+cfg.Env[k])
-		}
-	}
 	// The control-socket marker lets any gc process attribute this agent, and
 	// the tool children that inherit its environment, to a live owner; see
 	// [Provider.FindRuntimesBySessionID]. It is appended after the cfg.Env
@@ -345,6 +361,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		sc.fence = f.Digest()
 	}
 	sc.capture = p.openCapture(name, cfg.Env, cmd.Process.Pid)
+	sc.conv = p.openConversation(name, cfg.Env, cmd.Process.Pid)
 	owned.Store(sc)
 
 	// Start readLoop before handshake so we can receive responses.
@@ -366,6 +383,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// not guaranteed to be dispatched.
 		<-sc.readDone
 		sc.capture.close(captureCloseTimeout)
+		sc.conv.Close(captureCloseTimeout)
 		sc.drainPending(nil)
 		sc.closeActivityPublisher()
 		_ = os.Remove(p.sockNamePath(name))
@@ -528,6 +546,33 @@ func (p *Provider) openCapture(name string, env map[string]string, pid int) *tra
 		return nil
 	}
 	return c
+}
+
+// openConversation starts the opt-in conversation exporter for one agent
+// start, or returns nil when GC_CONVERSATION_EXPORT is not enabled. It only
+// reads the session's launch env.
+func (p *Provider) openConversation(name string, env map[string]string, pid int) *convtel.Session {
+	exp := p.conversationExporter()
+	if exp == nil {
+		return nil
+	}
+	return convtel.NewSession(exp, convtel.IdentityFromEnv(name, env, pid), convtel.SecretEnvValues(env))
+}
+
+func (p *Provider) conversationExporter() *convtel.Exporter {
+	if p.cfg.ConversationExporter != nil {
+		return p.cfg.ConversationExporter
+	}
+	return convtel.Default()
+}
+
+// environ reads the parent environment a session inherits: execenv.Environ,
+// unless a test replaced it.
+func (p *Provider) environ() []string {
+	if p.environFunc != nil {
+		return p.environFunc()
+	}
+	return execenv.Environ()
 }
 
 func envWithoutKey(env []string, key string) []string {

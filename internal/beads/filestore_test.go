@@ -358,6 +358,96 @@ func TestFileStoreFenceSurvivesReopen(t *testing.T) {
 	}
 }
 
+func TestFileStoreActorBoundClaims(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "beads.json")
+	first, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := first.Create(beads.Bead{Title: "competing file claims"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stores := map[string]beads.Store{
+		"one": beads.WithClaimActor(first, "one"),
+		"two": beads.WithClaimActor(second, "two"),
+	}
+	type result struct {
+		bead beads.Bead
+		won  bool
+		err  error
+	}
+	results := make(chan result, len(stores))
+	for _, store := range stores {
+		go func(store beads.Store) {
+			claimed, won, err := store.(beads.AssignmentClaimer).Claim(b.ID)
+			results <- result{claimed, won, err}
+		}(store)
+	}
+	owner := ""
+	for range stores {
+		r := <-results
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if r.won {
+			if owner != "" {
+				t.Fatal("multiple file claim winners")
+			}
+			owner = r.bead.Assignee
+		}
+	}
+	if owner == "" {
+		t.Fatal("no file claim winner")
+	}
+	held, err := second.Get(b.ID)
+	if err != nil || held.Assignee != owner || held.Status != "in_progress" || held.Metadata[beads.WorkLeaseExpiresMetadataKey] != "" {
+		t.Fatalf("durable file claim = %+v, %v", held, err)
+	}
+	bound := stores[owner]
+	again, won, err := bound.(beads.AssignmentClaimer).Claim(b.ID)
+	if err != nil || !won || again.Revision != held.Revision || again.ClaimFence != held.ClaimFence {
+		t.Fatalf("same-owner claim = %+v, %v, %v", again, won, err)
+	}
+	if changed, previous, err := bound.(beads.StaleAssignmentReclaimer).ReclaimStale(b.ID); changed || previous != "" || !errors.Is(err, beads.ErrReclaimUnsupported) {
+		t.Fatalf("file lease absence = %v, %q, %v", changed, previous, err)
+	}
+	transfer := bound.(beads.ConditionalAssigneeTransferer)
+	if moved, err := transfer.TransferIfCurrent(b.ID, "stale", "intruder"); err != nil || moved {
+		t.Fatalf("stale transfer = %v, %v", moved, err)
+	}
+	if moved, err := transfer.TransferIfCurrent(b.ID, owner, "next"); err != nil || !moved {
+		t.Fatalf("current-owner transfer = %v, %v", moved, err)
+	}
+	if released, err := bound.(beads.ConditionalAssignmentReleaser).ReleaseIfCurrent(b.ID, owner); err != nil || released {
+		t.Fatalf("stale release = %v, %v", released, err)
+	}
+	third, err := beads.OpenFileStore(fsys.OSFS{}, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, err := third.Get(b.ID)
+	if err != nil || moved.Assignee != "next" || moved.ClaimFence <= held.ClaimFence {
+		t.Fatalf("persisted transfer = %+v, %v", moved, err)
+	}
+	if err := third.Close(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, won, err := bound.(beads.AssignmentClaimer).Claim(b.ID); err != nil || won {
+		t.Fatalf("terminal claim = %v, %v", won, err)
+	}
+	if _, won, err := bound.(beads.AssignmentClaimer).Claim("missing"); won || !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("missing claim = %v, %v", won, err)
+	}
+	if _, won, err := beads.WithClaimActor(third, " ").(beads.AssignmentClaimer).Claim(b.ID); won || err == nil {
+		t.Fatalf("empty actor = %v, %v", won, err)
+	}
+}
+
 // TestFileStoreReleaseIfCurrentFenceSurvivesReopen covers the marquee
 // guarded-release round-trip: a release through ReleaseIfCurrent (the
 // ConditionalAssignmentReleaser path, NOT on the base Store interface, so the

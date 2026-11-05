@@ -1907,13 +1907,13 @@ func TestEffectiveWorkQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Errorf("EffectiveWorkQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --limit=20`) {
+	if !strings.Contains(got, `bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --limit=0`) {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 pool-demand probe: %q", got)
 	}
 	if !strings.Contains(got, "-- mayor") {
 		t.Errorf("EffectiveWorkQuery() missing tier 3 target argument: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --sort oldest --limit=20`) {
+	if !strings.Contains(got, `bd ready --metadata-field "gc.run_target=$target" --metadata-field "gc.kind=workflow" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --sort oldest --limit=0`) {
 		t.Errorf("EffectiveWorkQuery() missing run_target migration fallback: %q", got)
 	}
 	for _, want := range []string{`.metadata`, `.[:1]`} {
@@ -1999,10 +1999,10 @@ func TestEffectiveWorkQueryRoutedTierServesCanonicalPriorityOrder(t *testing.T) 
 func TestEffectiveWorkQueryBD105CompatibilityOptIn(t *testing.T) {
 	a := Agent{Name: "mayor"}
 	got := a.EffectiveWorkQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
-	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --limit=20`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json --limit=0`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral routed probe: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=1`) {
 		t.Errorf("EffectiveWorkQueryForBeads(bd-1.0.5) missing include-ephemeral assigned probe: %q", got)
 	}
 }
@@ -2132,7 +2132,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	if strings.Contains(got, `--include-ephemeral`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() default must be bd 1.0.4-compatible without --include-ephemeral: %q", got)
 	}
-	if !strings.Contains(got, `bd ready --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --assignee="$id" --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQuery() missing assigned-ready tier: %q", got)
 	}
 	if strings.Contains(got, "gc.routed_to") {
@@ -2144,7 +2144,7 @@ func TestEffectiveAssignedReadyQueryDefault(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=worker-session --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
+  "ready --assignee=worker-session --exclude-label hold:mayor --exclude-label hold:external --json --limit=1") printf '[{"id":"assigned-ready"}]' ;;
   *) printf '[]' ;;
 esac
 `)
@@ -2156,7 +2156,7 @@ esac
 func TestEffectiveAssignedReadyQueryForBeadsBD105Compatibility(t *testing.T) {
 	a := Agent{Name: "worker", Dir: "hello-world"}
 	got := a.EffectiveAssignedReadyQueryFor(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}})
-	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --json --limit=1`) {
+	if !strings.Contains(got, `bd ready --include-ephemeral --assignee="$id" --exclude-label "hold:mayor" --exclude-label "hold:external" --json --limit=1`) {
 		t.Fatalf("EffectiveAssignedReadyQueryForBeads(bd-1.0.5) missing include-ephemeral assigned-ready tier: %q", got)
 	}
 }
@@ -2269,12 +2269,12 @@ func TestEffectiveAssignedReadyQueryControlDispatcherClaimsLegacyAssignedWork(t 
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --assignee=gascity--control-dispatcher --json --limit=1"|\
-  "ready --assignee=gascity/control-dispatcher --json --limit=1")
+  "ready --assignee=gascity--control-dispatcher --exclude-label hold:mayor --exclude-label hold:external --json --limit=1"|\
+  "ready --assignee=gascity/control-dispatcher --exclude-label hold:mayor --exclude-label hold:external --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --json --limit=1")
+  "ready --assignee=gascity--workflow-control --exclude-label hold:mayor --exclude-label hold:external --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --exclude-label hold:mayor --exclude-label hold:external --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -2404,8 +2404,8 @@ case "$*" in
   "list --status in_progress --assignee=gascity/workflow-control --json --limit=1")
     printf '[]'
     ;;
-  "ready --assignee=gascity--workflow-control --json --limit=1"|\
-  "ready --assignee=gascity/workflow-control --json --limit=1")
+  "ready --assignee=gascity--workflow-control --exclude-label hold:mayor --exclude-label hold:external --json --limit=1"|\
+  "ready --assignee=gascity/workflow-control --exclude-label hold:mayor --exclude-label hold:external --json --limit=1")
     printf '[{"id":"ga-legacy-ready"}]'
     ;;
   *)
@@ -2423,13 +2423,13 @@ func TestEffectiveWorkQueryControlDispatcherClaimsLegacyUnassignedRoute(t *testi
 	out := runEffectiveWorkQuery(t, a, nil, `#!/bin/sh
 set -eu
 case "$*" in
-  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--limit=20"*)
+  *"ready --include-ephemeral"*"--metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--limit=0"*)
     printf '[]'
     ;;
-  *"ready --metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--limit=20"*)
+  *"ready --metadata-field gc.routed_to=gascity/control-dispatcher"*"--unassigned"*"--exclude-type=epic"*"--json"*"--limit=0"*)
     printf '[]'
     ;;
-  *"ready --metadata-field gc.routed_to=gascity/workflow-control"*"--unassigned"*"--exclude-type=epic"*"--json"*"--limit=20"*)
+  *"ready --metadata-field gc.routed_to=gascity/workflow-control"*"--unassigned"*"--exclude-type=epic"*"--json"*"--limit=0"*)
     printf '[{"id":"ga-legacy-route"}]'
     ;;
   *)
@@ -2458,7 +2458,7 @@ func TestEffectiveWorkQueryRoutedQueueUsesNativeCanonicalSortAcrossReadyTiers(t 
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --limit=20")
+  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --limit=0")
     printf '[{"id":"served-no-history","priority":2,"created_at":"2026-05-20T06:09:30Z","no_history":true}]'
     ;;
   *)
@@ -2507,7 +2507,7 @@ func TestEffectiveWorkQueryRoutedQueueRidesReaderPriorityOrder(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --limit=20")
+  "ready --metadata-field gc.routed_to=hello-world/worker --unassigned --exclude-type=epic --exclude-label hold:mayor --exclude-label hold:external --exclude-label human --json --limit=0")
     printf '[{"id":"newer-p0","priority":0,"created_at":"2026-05-21T06:09:30Z"},{"id":"older-p2","priority":2,"created_at":"2026-05-20T06:09:30Z"}]'
     ;;
   *)
@@ -2527,10 +2527,10 @@ func TestEffectiveWorkQueryRoutedFallbackUsesNativeOldestSort(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
+  *"ready --metadata-field gc.routed_to=hello-world/worker"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=0"*)
     printf '[]'
     ;;
-  *"ready --metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=20"*)
+  *"ready --metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*"--unassigned"*"--exclude-type=epic"*"--json"*"--sort oldest"*"--limit=0"*)
     printf '[{"id":"older-fallback","priority":2,"created_at":"2026-05-20T06:09:30Z","metadata":{"gc.kind":"workflow","gc.run_target":"hello-world/worker"}}]'
     ;;
   *)
@@ -2592,7 +2592,7 @@ func TestEffectiveWorkQueryExcludesEpics(t *testing.T) {
 		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json`,
 		// assigned tiers carry NO epic exclusion
 		`bd list --status in_progress --assignee="$id" --json`,
-		`bd ready --assignee="$id" --json`,
+		`bd ready --assignee="$id" --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
 		`-- hello-world/worker`,
 	}
 	for _, want := range wantPresent {
@@ -2617,7 +2617,7 @@ func TestEffectiveWorkQueryExcludesEpicsControlDispatcher(t *testing.T) {
 	wantPresent := []string{
 		`bd ready --metadata-field "gc.routed_to=$target" --unassigned --exclude-type=epic --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --json`,
 		`bd list --status in_progress --assignee="$cand" --json`,
-		`bd ready --assignee="$cand" --json`,
+		`bd ready --assignee="$cand" --exclude-label "hold:mayor" --exclude-label "hold:external" --json`,
 		`-- gascity/control-dispatcher gascity/workflow-control`,
 	}
 	for _, want := range wantPresent {
@@ -2963,11 +2963,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			wq := tt.agent.EffectiveWorkQuery()
 			demand := tt.agent.EffectivePoolDemandQuery()
-			workPredicate := bdReadyPoolDemandShell("--limit=20", QueryTopology{})
+			workPredicate := bdReadyPoolDemandShell("--limit=0", QueryTopology{})
 			if !strings.Contains(wq, workPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
 			}
-			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{})
+			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=0", QueryTopology{})
 			if !strings.Contains(wq, migrationWorkPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared migration predicate %q in %q", migrationWorkPredicate, wq)
 			}

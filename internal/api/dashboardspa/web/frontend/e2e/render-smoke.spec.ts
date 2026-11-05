@@ -262,6 +262,8 @@ test.describe('dashboard render smoke over the seeded corpus', () => {
     // the engineering-types board (routes/Beads.tsx, supervisor/beadReads.ts).
     // Exact id match so a longer id substring cannot satisfy it.
     await page.getByRole('button', { name: 'closed' }).click();
+    // Workflow steps are coordination records, hidden until the toggle.
+    await page.getByRole('button', { name: /coordination records/ }).click();
     await expect(page.getByText(COMPLETED_STEP_APPROVE, { exact: true }).first()).toBeVisible();
   });
 
@@ -378,6 +380,8 @@ test.describe('dashboard render smoke over the seeded corpus', () => {
   test('bead detail modal renders dependencies and closes cleanly', async ({ page }) => {
     await gotoCityRoute(page, CITY_BASE, '/beads');
     await expect(page.getByRole('heading', { name: 'Beads', level: 1 })).toBeVisible();
+    // Workflow steps are coordination records, hidden until the toggle.
+    await page.getByRole('button', { name: /coordination records/ }).click();
     // Open the seeded review step, which "needs" the preflight step. Its row button
     // is anchored by title so the click is unambiguous.
     await page.locator(`[title="Select ${REVIEW_BEAD_ID}"]`).click();

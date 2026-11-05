@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -12,11 +14,21 @@ import (
 //
 // The single-store control below is the other half. Together they say: the
 // reader swap happens on exactly the topologies that need it and nowhere else.
+//
+// The federated read asks for the candidates window, not one row: the merged
+// answer's first row may be gated, and the tier serves the first row of the
+// window its gate passes (TestFederatedInProgressTierServesTheFirstServableRowOfTheWindow).
+// The window excludes the dispatch holds and ends at its first unblocked row, so
+// a row past the one the tier serves is never resolved
+// (TestFederatedInProgressTierServesTheClaimAheadOfAnUnresolvableRow). It
+// excludes mail too, so a claimed mail wisp cannot be that first unblocked row
+// (TestFederatedInProgressTierSkipsAssignedMailWisp).
 func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true})
-		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --json --limit=1)` +
-			workQueryReadFailure("gc ready --status in_progress") + `; `
+		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --exclude-type=message --exclude-label "hold:mayor" --exclude-label "hold:external" --until-unblocked --json --limit=20)` +
+			workQueryReadFailure("gc ready --status in_progress") + `; ` +
+			servableInProgressRowsScript(1)
 		if got != want {
 			t.Errorf("federated tier-0 for $%s =\n  %q\nwant\n  %q", shellVar, got, want)
 		}
@@ -38,6 +50,24 @@ func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	}
 }
 
+func TestSQLiteWorkQueriesDoNotInvokeExternalBeads(t *testing.T) {
+	topo := QueryTopology{Beads: BeadsConfig{Provider: "sqlite-work"}}
+	externalBD := regexp.MustCompile(`(^|[;|&(])\s*bd (query|show|ready|list|update)`)
+	for _, name := range []string{"worker", "core.control-dispatcher"} {
+		a := &Agent{Name: name}
+		for kind := range queryTable {
+			script := a.effectiveQuery(kind, topo)
+			if externalBD.MatchString(script) {
+				t.Errorf("%s query %d invokes external bd: %s", name, kind, script)
+			}
+			cmd := exec.Command("sh", "-n", "-c", script)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Errorf("%s query %d shell syntax: %v: %s", name, kind, err, out)
+			}
+		}
+	}
+}
+
 // TestAssignedInProgressTierOnSingleStore is the control: a city that
 // relocates nothing keeps its single-store `bd list` reader, and that read
 // fails the query the same way the federated one does. It once pinned the
@@ -55,7 +85,7 @@ func TestAssignedInProgressTierOnSingleStore(t *testing.T) {
 	// The single-store enrichment must not grow the presence key: its reader is
 	// `bd list`, whose rows never carry blocked_by, so the branch could only ever
 	// be dead shell on the path every deployment runs.
-	single := inProgressBlockedByEnrichmentScript(false, true)
+	single := inProgressBlockedByEnrichmentScript(false, true, false)
 	if strings.Contains(single, "blocked_by // empty") {
 		t.Errorf("single-store enrichment grew the federated presence key: %q", single)
 	}

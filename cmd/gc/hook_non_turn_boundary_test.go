@@ -8,26 +8,44 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// installNonTurnDemandProbe puts a fake `bd` on PATH that serves ONE routed,
-// unassigned demand row to the routed-pool tier and records every invocation.
-//
-// It answers `[]` to every other tier so the generated query reaches the routed
-// tier without dragging the blocked_by enrichment (which shells `bd show` and
-// jq) into the fixture. The recorded argv is the assertion surface: a claim is a
-// `bd update <id> --claim`, so its presence or absence in the log is direct
-// evidence of whether a mutation ran, which an exit code alone cannot give.
-func installNonTurnDemandProbe(t *testing.T) (argvLog string) {
+// installNonTurnDemandProbe records query invocations and returns a real work
+// row from the city's configured file store. Claims use that store directly.
+func installNonTurnDemandProbe(t *testing.T, cityDir string) (argvLog, demandID string) {
 	t.Helper()
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := closeBeadStoreHandle(store); err != nil {
+			t.Errorf("close test store: %v", err)
+		}
+	})
+	demand, err := store.Create(beads.Bead{
+		Title: "routed demand", Type: "task",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	demandJSON, err := json.Marshal([]beads.Bead{demand})
+	if err != nil {
+		t.Fatal(err)
+	}
+	demandID = demand.ID
+	t.Setenv("BD_DEMAND_JSON", string(demandJSON))
 	fakeBin := t.TempDir()
 	argvLog = filepath.Join(t.TempDir(), "bd-argv.log")
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$BD_ARGV_LOG"
 for a in "$@"; do
   if [ "$a" = "--metadata-field" ]; then
-    printf '[{"id":"demand-1","status":"open","issue_type":"task","metadata":{"gc.routed_to":"worker"}}]'
+    printf '%s' "$BD_DEMAND_JSON"
     exit 0
   fi
 done
@@ -38,26 +56,26 @@ printf '[]'
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("BD_ARGV_LOG", argvLog)
-	return argvLog
+	return argvLog, demandID
 }
 
-// nonTurnProbeClaimed reports whether the fake bd was ever asked to run a claim
-// mutation.
-func nonTurnProbeClaimed(t *testing.T, argvLog string) bool {
+// nonTurnProbeClaimed reads the actual file-store claim, not external argv.
+func nonTurnProbeClaimed(t *testing.T, cityDir, demandID string) bool {
 	t.Helper()
-	raw, err := os.ReadFile(argvLog)
+	store, err := openCityStoreAt(cityDir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
-		t.Fatalf("reading bd argv log: %v", err)
+		t.Fatal(err)
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.Contains(line, "update") && strings.Contains(line, "--claim") {
-			return true
+	t.Cleanup(func() {
+		if err := closeBeadStoreHandle(store); err != nil {
+			t.Errorf("close test store: %v", err)
 		}
+	})
+	row, err := store.Get(demandID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return false
+	return row.Assignee != "" || row.Status != "open"
 }
 
 // nonTurnStepStartedCount counts execution.step_started records in the city's
@@ -101,7 +119,7 @@ func TestNonTurnHookInvocationCannotMintExecution(t *testing.T) {
 			t.Setenv("GC_BEADS", "file")
 			cityDir := writeFenceTestCity(t)
 			sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
-			argvLog := installNonTurnDemandProbe(t)
+			argvLog, demandID := installNonTurnDemandProbe(t, cityDir)
 			setFenceClaimEnv(t, cityDir, sessionID, "live-token")
 			t.Setenv(marker.key, marker.value)
 
@@ -111,7 +129,7 @@ func TestNonTurnHookInvocationCannotMintExecution(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("code = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
 			}
-			if nonTurnProbeClaimed(t, argvLog) {
+			if nonTurnProbeClaimed(t, cityDir, demandID) {
 				t.Fatalf("a %s callback lane ran a claim mutation; bd argv log:\n%s", marker.key, readFileForTest(t, argvLog))
 			}
 			// The refusal must also be CHEAP. A provider callback's whole budget
@@ -149,15 +167,24 @@ func TestTurnHookInvocationMintsTheClaim(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir := writeFenceTestCity(t)
 	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
-	argvLog := installNonTurnDemandProbe(t)
+	argvLog, demandID := installNonTurnDemandProbe(t, cityDir)
 	setFenceClaimEnv(t, cityDir, sessionID, "live-token")
 
 	var stdout, stderr bytes.Buffer
-	cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
-
-	if !nonTurnProbeClaimed(t, argvLog) {
-		t.Fatalf("a real turn did not reach the claim mutation; stdout=%q stderr=%s\nbd argv log:\n%s",
-			stdout.String(), stderr.String(), readFileForTest(t, argvLog))
+	code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true}, &stdout, &stderr)
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := closeBeadStoreHandle(store); err != nil {
+			t.Errorf("close test store: %v", err)
+		}
+	})
+	claimed, err := store.Get(demandID)
+	if code != 0 || err != nil || claimed.Status != "in_progress" || claimed.Assignee != "worker-1" {
+		t.Fatalf("a real turn did not claim %s: code=%d bead=%+v err=%v stdout=%q stderr=%s\nbd argv log:\n%s",
+			demandID, code, claimed, err, stdout.String(), stderr.String(), readFileForTest(t, argvLog))
 	}
 }
 

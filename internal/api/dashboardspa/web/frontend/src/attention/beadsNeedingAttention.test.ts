@@ -170,6 +170,34 @@ describe('stalled in-progress detection (gp-6xd)', () => {
     ]);
   });
 
+  // Recorded from live /beads?status=in_progress (gcg-786433, 7m old): workflow
+  // roots are unassigned by design while their claimed steps execute.
+  it('does not mark an unassigned workflow root stalled, but keeps its holds', () => {
+    const root = bead({
+      id: 'gcg-786433',
+      title: 'mol-gfx-pr-work',
+      status: 'in_progress',
+      created_at: '2026-06-07T11:50:00.000Z',
+      updated_at: '2026-06-07T11:53:00.000Z',
+      metadata: { 'gc.kind': 'workflow', 'gc.formula_name': 'mol-gfx-pr-work' },
+    });
+    expect(select({ beads: [root], sessions: [] })).toEqual([]);
+    expect(inProgressCardNote(root, [], NOW)).toBeNull();
+    const held = { ...root, labels: ['hold:mayor'] };
+    expect(select({ beads: [held], sessions: [] })).toEqual([
+      expect.objectContaining({ reason: 'waiting-human' }),
+    ]);
+  });
+
+  it('reports sub-hour stall age in minutes', () => {
+    const rows = select({
+      beads: [
+        bead({ id: 'B-doing', status: 'in_progress', updated_at: '2026-06-07T11:53:00.000Z' }),
+      ],
+    });
+    expect(rows[0]?.summary).toBe('stalled 7m — no assignee');
+  });
+
   it('marks an in-progress bead as stalled when no session resolves to the assignee', () => {
     const rows = select({
       beads: [inProgress()],

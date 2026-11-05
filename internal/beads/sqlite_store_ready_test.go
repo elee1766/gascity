@@ -289,6 +289,77 @@ func TestSQLiteStoreReadyContextCancelsWhileWaitingForAConnection(t *testing.T) 
 	}
 }
 
+func TestSQLiteExternalReadinessCacheNeverWaitsForReadPool(t *testing.T) {
+	foreignStore, err := OpenSQLiteStore(t.TempDir(), WithSQLiteStoreIDPrefix("foreign"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := foreignStore.(*SQLiteStore)
+	t.Cleanup(func() { _ = foreign.CloseStore() })
+	blocker, err := foreign.Create(Bead{Title: "foreign blocker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := OpenSQLiteStore(t.TempDir(), WithSQLiteDependencyResolver(func(_ context.Context, id string) (Bead, error) {
+		return foreign.Get(id)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := opened.(*SQLiteStore)
+	t.Cleanup(func() { _ = store.CloseStore() })
+	dependent, err := store.Create(Bead{Title: "ready work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	store.readDB.SetMaxOpenConns(1)
+	for _, name := range []string{"cache only", "deadline"} {
+		t.Run(name, func(t *testing.T) {
+			held, err := store.readDB.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() {
+				if name == "cache only" {
+					if _, ok := cache.CachedReady(); ok {
+						done <- fmt.Errorf("cache accepted externally changing readiness")
+						return
+					}
+					done <- nil
+					return
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				defer cancel()
+				_, err := cache.ReadyContext(ctx)
+				if !errors.Is(err, ErrCacheUnavailable) && !errors.Is(err, context.DeadlineExceeded) {
+					done <- fmt.Errorf("ReadyContext error = %w", err)
+					return
+				}
+				done <- nil
+			}()
+			select {
+			case err := <-done:
+				_ = held.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				_ = held.Close()
+				<-done
+				t.Fatal("cache-only read waited for the backing read pool")
+			}
+		})
+	}
+}
+
 func TestSQLiteStoreSatisfiesContextReadyReader(t *testing.T) {
 	store := newReadySQLiteStore(t)
 	if _, ok := Store(store).(ContextReadyReader); !ok {

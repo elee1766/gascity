@@ -4230,18 +4230,13 @@ func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) 
 		t.Fatalf("desired sessions = %d, want 1", len(desired))
 	}
 	for _, tp := range desired {
-		if got := tp.Env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
-			t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
+		// The stamp stays controller-side demand bookkeeping: the seat's shell
+		// carries only the presence marker, never the id or its store ref
+		// (gastownhall/gascity#5738).
+		if got := tp.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
+			t.Fatalf("GC_SPAWN_ORIGIN = %q, want demand", got)
 		}
-		if got := tp.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "gp-59q" {
-			t.Fatalf("GC_TRIGGER_WORK_BEAD_ID = %q, want gp-59q", got)
-		}
-		if got := tp.Env["GC_TRIGGER_BEAD_STORE_REF"]; got != "rig:gascity-packs" {
-			t.Fatalf("GC_TRIGGER_BEAD_STORE_REF = %q, want rig:gascity-packs", got)
-		}
-		if got := tp.Env["GC_TRIGGER_WORK_STORE_REF"]; got != "rig:gascity-packs" {
-			t.Fatalf("GC_TRIGGER_WORK_STORE_REF = %q, want rig:gascity-packs", got)
-		}
+		assertEnvWithholdsTriggerIDs(t, "seat env", tp.Env)
 		if got := tp.Env["GC_PACKER_PACK"]; got != "packer" {
 			t.Fatalf("GC_PACKER_PACK = %q, want packer", got)
 		}
@@ -13241,7 +13236,7 @@ func TestControlDispatcherRouteRepairAgreesWithTheMinter(t *testing.T) {
 		if !scoped {
 			t.Fatalf("ScopeRigContext(%q) not scoped", tc.root)
 		}
-		minted, err := graphroute.ControlDispatcherBinding(nil, "test-city", cfg, rigContext, deps)
+		minted, err := graphroute.ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, rigContext, deps)
 		if err != nil {
 			t.Fatalf("ControlDispatcherBinding(%q): %v", tc.root, err)
 		}
@@ -14670,6 +14665,119 @@ func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) 
 			if tp.ConfiguredNamedIdentity != "" {
 				t.Fatalf("desired[%q].ConfiguredNamedIdentity = %q, want empty — the ad-hoc bead must not adopt the named session identity",
 					sessionName, tp.ConfiguredNamedIdentity)
+			}
+		})
+	}
+}
+
+// A namepool change must not rename a live member. Real case: after the
+// gastown.polecat namepool was replaced, session 16757e57 (agent_name
+// trade/gastown.furiosa, pool_slot 1) was re-aliased to slot 1's new name
+// trade/gastown.aelia and given the aelia work dir.
+func TestBuildDesiredState_NamepoolChangeKeepsExistingMemberIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	agent := config.Agent{
+		Name:              "polecat",
+		Dir:               "trade",
+		BindingName:       "gastown",
+		StartCommand:      "true",
+		MaxActiveSessions: intPtr(4),
+		NamepoolNames:     []string{"furiosa", "nux"},
+		ScaleCheck:        "printf 1",
+	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{agent}}
+	first := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(first.State) != 1 {
+		t.Fatalf("desired sessions = %d, want 1", len(first.State))
+	}
+	for _, tp := range first.State {
+		if tp.InstanceName != "trade/gastown.furiosa" {
+			t.Fatalf("initial InstanceName = %q, want trade/gastown.furiosa", tp.InstanceName)
+		}
+	}
+
+	agent.NamepoolNames = []string{"aelia", "balbus"}
+	cfg = &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{agent}}
+	second := buildDesiredState("test-city", cityPath, time.Now().UTC(), cfg, runtime.NewFake(), store, io.Discard)
+	if len(second.State) != 1 {
+		t.Fatalf("desired sessions after namepool change = %d, want 1", len(second.State))
+	}
+	for _, tp := range second.State {
+		if tp.InstanceName != "trade/gastown.furiosa" || tp.Alias != "trade/gastown.furiosa" {
+			t.Fatalf("after namepool change InstanceName=%q Alias=%q, want both trade/gastown.furiosa", tp.InstanceName, tp.Alias)
+		}
+		if got := tp.Env["GC_AGENT"]; got != "" && got != "trade/gastown.furiosa" {
+			t.Fatalf("GC_AGENT = %q, want trade/gastown.furiosa", got)
+		}
+		if strings.Contains(tp.WorkDir, "aelia") {
+			t.Fatalf("WorkDir = %q moved to the slot's new name", tp.WorkDir)
+		}
+	}
+
+	cfgAgent := &cfg.Agents[0]
+	bead := beads.Bead{Labels: []string{"agent:trade/gastown.furiosa"}, Metadata: map[string]string{
+		"template": "trade/gastown.polecat", "agent_name": "trade/gastown.furiosa", "alias": "trade/gastown.aelia",
+		"pool_slot": "1", "pool_managed": "true", "session_name": "gastown__polecat-gcg-session-16757e57",
+	}}
+	if _, qn := canonicalSessionIdentityWithConfig(cfg, cfgAgent, bead); qn != "trade/gastown.furiosa" {
+		t.Fatalf("canonical identity = %q, want trade/gastown.furiosa", qn)
+	}
+	if _, qn, _ := poolDesiredRequestIdentity(cfgAgent, 2); qn != "trade/gastown.balbus" {
+		t.Fatalf("new slot 2 identity = %q, want trade/gastown.balbus", qn)
+	}
+}
+
+// TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID reproduces
+// gastownhall/gascity#5738: a demand-spawned pool seat's shell must carry only
+// the presence-only GC_SPAWN_ORIGIN marker, never an id-shaped trigger hint a
+// ${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-…}} close chain could mistake for the
+// bead the seat actually claimed (the pool is pull). That holds when the
+// controller's own environment carries a launching pane's GC_TRIGGER_* keys
+// too: the seat withholds them rather than inheriting a foreign id, and an
+// unstamped seat withholds the marker as well.
+func TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID(t *testing.T) {
+	for _, c := range []struct {
+		name, workBeadID, wantOrigin string
+	}{
+		{"stamped", "gp-a", demandSpawnOriginValue},
+		{"unstamped", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			setControllerDemandSpawnEnv(t)
+			store := beads.NewMemStore()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(1),
+				}},
+			}
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			desired := map[string]TemplateParams{}
+
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+				Template: "worker",
+				Requests: []SessionRequest{{
+					Template:     "worker",
+					Tier:         "new",
+					WorkBeadID:   c.workBeadID,
+					WorkStoreRef: "rig:gascity",
+				}},
+			}, desired, &stderr)
+
+			if len(desired) != 1 {
+				t.Fatalf("desired sessions = %d, want 1; stderr=%q", len(desired), stderr.String())
+			}
+			for _, tp := range desired {
+				assertEnvWithholdsTriggerIDs(t, "pool seat shell env", tp.Env)
+				if got, ok := tp.Env["GC_SPAWN_ORIGIN"]; !ok || got != c.wantOrigin {
+					t.Errorf("GC_SPAWN_ORIGIN = (%q, present=%v), want %q", got, ok, c.wantOrigin)
+				}
 			}
 		})
 	}

@@ -15,6 +15,15 @@ keep already-owned workflow anchors available for continuation. Update the
 shell count and Go predicates together; otherwise an unclaimable latch can
 continually wake replacement workers.
 
+Apply worker candidate limits after topology filtering and executable-work
+preference, including the legacy routing probe. A bounded raw read can contain
+only structural roots while the unlimited demand count still sees ready work.
+
+For `sqlite-work`, generated recovery hooks must use `gc ready` and guarded
+`gc bd update --if-assignee --if-status`, not a raw `bd` subprocess. Preserve
+the provider-independent user override and the existing bd recovery scripts.
+Keep the native read across work and infrastructure stores and both tiers.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and
@@ -40,6 +49,15 @@ When adding a field to `config.Rig`, also add the corresponding optional
 field to `RigPatch` and wire the merge into `applyRigPatch` so layered
 configs (fragments, patches) can override it. No field-sync test exists for
 Rig today; the patch path must be checked manually.
+
+Exception: `federation` and `namespace` (`internal/config/rig_federation.go`)
+are deliberately absent from `RigPatch`. They decide which rows of a shared
+bead store the city may act on, so only the rig's own `[[rigs]]` entry may set
+them; a pack-level patch must not be able to drop the guard. Their checks run
+in `ValidateRigFederation` on every load and in `ValidateRigFederationLayout`
+beside each `ValidateRigs` call. Unlike `ValidateRigs`, a layout failure on
+reload is a refusal (`tryReloadConfig`), not a warning: a running city must
+not adopt a config that start would refuse.
 
 ## Adding `.gc/site.toml` fields
 

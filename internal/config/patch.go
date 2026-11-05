@@ -59,6 +59,9 @@ type AgentPatch struct {
 	// Relative paths resolve against the declaring config file's directory
 	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	PromptTemplate *string `toml:"prompt_template,omitempty"`
+	// Namepool overrides the namepool file path (one name per line).
+	// Relative paths resolve like PromptTemplate.
+	Namepool *string `toml:"namepool,omitempty"`
 	// Session overrides the session transport ("acp" or "tmux").
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
@@ -555,6 +558,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.PromptTemplate != nil {
 		a.PromptTemplate = *p.PromptTemplate
+	}
+	if p.Namepool != nil {
+		a.Namepool = *p.Namepool
 	}
 	if p.Session != nil {
 		a.Session = *p.Session

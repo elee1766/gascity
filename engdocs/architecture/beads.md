@@ -10,8 +10,8 @@ The Bead Store is the universal persistence substrate for Gas City -- a
 Layer 0-1 primitive that provides CRUD, parent-child relationships, labels,
 and molecule instantiation over work units called beads. Everything in Gas
 City is a bead: tasks, mail, molecules, convoys, and epics. The `Store`
-interface abstracts over four implementations (BdStore, FileStore, MemStore,
-and exec Store) so that higher-layer mechanisms like dispatch, orders,
+interface abstracts over BdStore, FileStore, MemStore, SQLiteStore,
+SQLiteWorkStore and exec Store so that higher-layer mechanisms like dispatch, orders,
 and messaging compose purely against the interface without knowing the
 storage backend.
 
@@ -47,8 +47,9 @@ storage backend.
 
 ## Architecture
 
-The bead store is a single interface with four implementations, selected
-at startup by the `[beads].provider` config key or `GC_BEADS` env var.
+The bead store is a shared interface with native and external implementations,
+selected at startup by `[beads].provider` or `GC_BEADS`. Native SQLite work
+stores are scope-local and independent of SQLite infrastructure bindings.
 
 ```
                        beads.Store (interface)
@@ -69,8 +70,11 @@ at startup by the `[beads].provider` config key or `GC_BEADS` env var.
 2. `[beads].provider` in `city.toml`
 3. Default: `"bd"`
 
-Valid provider values: `"bd"` (BdStore, default), `"file"` (FileStore),
-and `"exec:<script-path>"` (exec.Store). The `"sqlite"`, `"sqlite-cgo"`, and
+Valid provider values include `"bd"` (BdStore, default), `"file"` (FileStore),
+`"sqlite-work"` (native scope-local SQLite work), and `"exec:<script-path>"`
+(exec.Store). See [the SQLite work provider](../../docs/reference/sqlite-work-provider.md)
+for initialization, command support, lease behavior and cutover limits. The
+`"sqlite"`, `"sqlite-cgo"`, and
 `"coordstore"` coordination-store providers were removed in favor of
 `"doltlite"` and now hard-error.
 
@@ -335,7 +339,7 @@ The bead store backend is selected via the `[beads]` section in `city.toml`:
 
 ```toml
 [beads]
-provider = "bd"        # "bd" (default), "file", or "exec:/path/to/script"
+provider = "bd"        # "bd" (default), "file", "sqlite-work", or "exec:/path/to/script"
 ```
 
 The `GC_BEADS` environment variable overrides the config file. Related

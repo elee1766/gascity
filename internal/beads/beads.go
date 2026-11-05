@@ -105,14 +105,113 @@ var ErrConditionalReleaseUnsupported = errors.New("conditional assignment releas
 // unconditional write. See ConditionalWriter for the full contract.
 var ErrConditionalWriteUnsupported = errors.New("conditional writes unsupported")
 
-// ErrClaimUnsupported reports that a store cannot perform the two-argument
-// compare-and-swap Claim(id, assignee) capability. It is the same shape as
+// ErrClaimUnsupported reports that a store cannot atomically claim a bead.
+// It is the same shape as
 // ErrConditionalReleaseUnsupported: a capability veto a forwarding wrapper
-// (beadPolicyStore, CachingStore, the emitting class store) returns when its
-// inner store does not implement the optional
-// `Claim(id, assignee string) (Bead, bool, error)` interface, rather than a
+// returns when its inner store cannot claim, rather than a
 // conflict or not-found outcome from an inner store that does.
 var ErrClaimUnsupported = errors.New("claim unsupported")
+
+// ErrReclaimUnsupported reports that a store cannot atomically reclaim an
+// assignment using its own stale-lease policy.
+var ErrReclaimUnsupported = errors.New("stale assignment reclaim unsupported")
+
+// AssignmentClaimer atomically assigns an eligible bead to its bound actor.
+// A lost ownership race returns acquired=false without changing the bead.
+// BdStore gets its actor from its original command runner environment. Stores
+// with an explicit-actor claim API use WithClaimActor to bind one immutable actor.
+type AssignmentClaimer interface {
+	Claim(id string) (Bead, bool, error)
+}
+
+type explicitAssignmentClaimer interface {
+	Claim(id, actor string) (Bead, bool, error)
+}
+
+// WithClaimActor binds an explicit-actor backend without modifying the backend.
+// Already bound stores, including BdStore, retain their original actor authority.
+// Stores without an atomic claim capability are returned unchanged.
+func WithClaimActor(store Store, actor string) Store {
+	// Policy wrappers retain their read behavior but identify the claim leaf.
+	if targeter, ok := store.(interface{ AssignmentClaimTarget() Store }); ok {
+		bound := WithClaimActor(targeter.AssignmentClaimTarget(), actor)
+		if claimer, ok := bound.(AssignmentClaimer); ok {
+			return &actorBoundStore{Store: store, claim: claimer.Claim}
+		}
+		return store
+	}
+	if _, ok := store.(AssignmentClaimer); ok {
+		return store
+	}
+	claimer, ok := store.(explicitAssignmentClaimer)
+	if !ok {
+		return store
+	}
+	return &actorBoundStore{Store: store, claim: func(id string) (Bead, bool, error) {
+		return claimer.Claim(id, actor)
+	}}
+}
+
+type actorBoundStore struct {
+	Store
+	claim func(string) (Bead, bool, error)
+}
+
+func (s *actorBoundStore) Claim(id string) (Bead, bool, error) {
+	return s.claim(id)
+}
+
+func (s *actorBoundStore) ReleaseIfCurrent(id, actor string) (bool, error) {
+	releaser, ok := s.Store.(ConditionalAssignmentReleaser)
+	if !ok {
+		return false, ErrConditionalReleaseUnsupported
+	}
+	return releaser.ReleaseIfCurrent(id, actor)
+}
+
+func (s *actorBoundStore) TransferIfCurrent(id, from, to string) (bool, error) {
+	mover, ok := s.Store.(ConditionalAssigneeTransferer)
+	if !ok {
+		return false, ErrConditionalTransferUnsupported
+	}
+	return mover.TransferIfCurrent(id, from, to)
+}
+
+func (s *actorBoundStore) ReclaimStale(id string) (bool, string, error) {
+	reclaimer, ok := s.Store.(StaleAssignmentReclaimer)
+	if !ok {
+		return false, "", ErrReclaimUnsupported
+	}
+	return reclaimer.ReclaimStale(id)
+}
+
+func (s *actorBoundStore) ConditionalWritesResolveTarget() Store { return s.Store }
+
+func (s *actorBoundStore) ConditionalWriterHandle() (ConditionalWriter, bool) {
+	return ConditionalWriterFor(s.Store)
+}
+
+func (s *actorBoundStore) GraphApplyHandle() (GraphApplyStore, bool) {
+	return GraphApplyFor(s.Store)
+}
+
+func (s *actorBoundStore) CloseStore() error {
+	store := s.Store
+	if cached, ok := store.(*CachingStore); ok {
+		cached.StopReconciler()
+		store = cached.Backing()
+	}
+	if closer, ok := store.(interface{ CloseStore() error }); ok {
+		return closer.CloseStore()
+	}
+	return nil
+}
+
+// StaleAssignmentReclaimer releases only a claim the store's lease policy
+// proves stale. It reports whether ownership changed and the previous owner.
+type StaleAssignmentReclaimer interface {
+	ReclaimStale(id string) (bool, string, error)
+}
 
 // ErrBDSilentFallback reports that a bd-backed store operation saw bd exit
 // successfully after falling back to on-disk JSONL auto-import mode. BdStore
@@ -211,8 +310,10 @@ type Bead struct {
 	NoHistory bool `json:"no_history,omitempty"`
 	// DeferUntil hides the bead from ready/claimable views until this time,
 	// mirroring bd's defer_until column (a future value means "not yet ready";
-	// nil or past means ready). Create paths preserve it; UpdateOpts does not
-	// mutate it.
+	// nil or past means ready — for a row the store does not record as
+	// deferred: a store-recorded deferred status defers the bead through
+	// IndefinitelyDeferred until the store itself lifts the deferral). Create
+	// paths preserve it; UpdateOpts does not mutate it.
 	DeferUntil *time.Time `json:"defer_until,omitempty"`
 	// IsBlocked carries bd's denormalized dependency-ready projection. Nil
 	// means the store did not provide it and cached ready falls back to
@@ -225,20 +326,24 @@ type Bead struct {
 	// stamped before closing, the same value BdStore and NativeDoltStore
 	// forward to their close. Reopening clears it.
 	CloseReason string `json:"close_reason,omitempty"`
-	// IndefinitelyDeferred preserves bd's status-based indefinite deferral
-	// after richer statuses normalize to Gas City's three-state model. Cache
-	// notifications restore status="deferred" on the event wire so another
-	// process can reconstruct it; other JSON surfaces remain unchanged.
+	// IndefinitelyDeferred preserves bd's status-based deferral after richer
+	// statuses normalize to Gas City's three-state model. It is set whenever
+	// the store records bd's deferred status, dated or not: defer_until only
+	// names when bd's own sweep may lift the deferral, and gc honors the lift
+	// once the store records it (#6207). Cache notifications restore
+	// status="deferred" on the event wire so another process can reconstruct
+	// it; other JSON surfaces remain unchanged.
 	//
 	// No read surface exposes it, so the two projections of the same bead
 	// disagree by design: a direct .gc/events.jsonl reader sees the
 	// status="deferred" EncodeBeadEventPayload wrote, while the HTTP, SSE and
-	// --json surfaces re-project through this struct and report status="open",
-	// defer_until=null, is_blocked=false — three signals that all read as
-	// "ready" for a bead ready deliberately excludes. An operator asking why a
-	// bead is not being picked up has nothing to read; giving the exclusion a
-	// derived read-only representation is a wire-design decision, not a
-	// consequence of this tag.
+	// --json surfaces re-project through this struct and report status="open"
+	// and is_blocked=false, with a defer_until that is null (a dateless
+	// deferral) or already past (a dated one the store has not woken) — signals
+	// that all read as "ready" for a bead ready deliberately excludes. An
+	// operator asking why a bead is not being picked up has nothing to read;
+	// giving the exclusion a derived read-only representation is a wire-design
+	// decision, not a consequence of this tag.
 	IndefinitelyDeferred bool `json:"-"`
 	// SourceStatus is the status the backing store recorded, as read, before
 	// Status folded it into Gas City's three-state model: bd's blocked,
@@ -379,14 +484,8 @@ type ConditionalAssignmentReleaser interface {
 // optional capability here: type-assert on the resolved store, never on a
 // wrapper.
 //
-// GROUNDWORK: no production caller depends on this interface yet. Outside
-// the forwarding wrappers, the only production TransferIfCurrent call is
-// cmd/gc's hookClaimRestampWithBdStore, on a BdStore it constructs itself.
-// CachingStore and cmd/gc's emitting class-store wrapper forward the
-// capability. Wrappers that forward ReleaseIfCurrent but not this include
-// ProxiedStore, the cmd/gc policy wrapper and splittest's StrictStore, so a
-// type assertion on any of them fails even over a capable store. Wire them
-// before the first caller relies on the capability through a wrapper.
+// Wrappers must forward this capability explicitly: embedding Store alone
+// hides it even when the underlying store can atomically transfer ownership.
 type ConditionalAssigneeTransferer interface {
 	TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error)
 }
@@ -605,8 +704,10 @@ type ConditionalWriterHandleProvider interface {
 // globally — mirroring GraphApplyFor. It does NOT unwrap the class_store.go
 // typed wrappers (WorkStore, GraphStore, …): those embed the Store interface, so
 // optional capabilities are not promoted through them and a direct assertion on
-// the wrapper fails. A caller holding a typed class wrapper must pass its
-// unwrapped .Store field to this helper, exactly as with GraphApplyFor.
+// the wrapper fails. A caller holding a typed class wrapper reaches the
+// capability with beads.As[ConditionalWriter], which sees through it; passing
+// the unwrapped .Store field here is the older unwrap the storeclass lint
+// baselines.
 func ConditionalWriterFor(store Store) (ConditionalWriter, bool) {
 	if store == nil {
 		return nil, false
@@ -932,10 +1033,12 @@ func HasReadyExcludedLabel(b Bead) bool {
 	return false
 }
 
-// IsDeferred reports whether a bead is hidden indefinitely by bd's deferred
-// status or temporarily by a future defer_until.
-// cmd_hook.isFutureDeferredHookCandidate mirrors only the time-bound half; it
-// operates on raw bd JSON before this normalization.
+// IsDeferred reports whether a bead is hidden by bd's deferred status (dated
+// or not, until the store itself lifts the deferral) or by a future
+// defer_until on a row the store does not record as deferred.
+// cmd_hook's filterUnreadyHookCandidates mirrors both halves on raw bd JSON,
+// before this normalization: isStoreDeferredHookCandidate reads the raw
+// status and isFutureDeferredHookCandidate the date.
 func IsDeferred(b Bead, now time.Time) bool {
 	return b.IndefinitelyDeferred ||
 		(b.DeferUntil != nil && b.DeferUntil.After(now))

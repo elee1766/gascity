@@ -221,7 +221,11 @@
               "beads-city-migrate-proxied",
               "storage-repair-sequence",
               "runtime-workdir-export",
-              "agent-is-foreign"
+              "agent-is-foreign",
+              "storage-vouch-bd",
+              "storage-remote-stage-mark",
+              "storage-remote-stage-unmark",
+              "convoy-release-pair"
             ]
           },
           "event_id": {

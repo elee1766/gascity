@@ -145,6 +145,7 @@ func nativeDoltCountSupported(query ListQuery, excludeTypes []string) bool {
 		len(query.IDs) == 0 &&
 		query.SeekAfter == nil &&
 		query.UpdatedBefore.IsZero() &&
+		query.UpdatedSince.IsZero() &&
 		len(query.Metadata) == 0 &&
 		query.CreatedBefore.IsZero() &&
 		query.ParentID == "" &&

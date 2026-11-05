@@ -26,8 +26,8 @@ const (
 	llvmArchiveDropStep  = "Keep the LLVM archive out of the runner cache"
 	llvmArchiveCheckStep = "llvm-fetched"
 	runnerCacheSaveStep  = "Save Bazel runner cache"
-	// The lane's runner cache saves are push-to-main runs of the unit lane.
-	runnerCacheSaveScope = "always() && matrix.lane == 'unit' && github.event_name == 'push' && github.ref == 'refs/heads/main' && "
+	// The lane's runner cache saves are default-branch pushes of the unit lane.
+	runnerCacheSaveScope = "always() && matrix.lane == 'unit' && github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && "
 )
 
 type compositeAction struct {

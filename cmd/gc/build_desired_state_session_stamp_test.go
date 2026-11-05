@@ -216,7 +216,7 @@ func TestStampRunSessionIdentitySkipsAmbiguousAssignee(t *testing.T) {
 func TestStampRunSessionIdentityReassignmentRestamps(t *testing.T) {
 	run := beads.Bead{
 		ID: "co-run2", Type: "molecule", Status: "in_progress", Assignee: "worker-b",
-		Metadata: map[string]string{"gc.session_name": "worker-a", "gc.work_dir": "/old"},
+		Metadata: map[string]string{"gc.session_id": "sess-worker-b", "gc.session_name": "worker-a", "gc.work_dir": "/old"},
 	}
 	mem := beads.NewMemStoreFrom(0, []beads.Bead{run}, nil)
 	store := &countingStore{Store: mem}
@@ -228,6 +228,39 @@ func TestStampRunSessionIdentityReassignmentRestamps(t *testing.T) {
 	if got.Metadata["gc.session_name"] != "worker-b" || got.Metadata["gc.work_dir"] != "/new" {
 		t.Errorf("reassignment not restamped: session_name=%q work_dir=%q",
 			got.Metadata["gc.session_name"], got.Metadata["gc.work_dir"])
+	}
+}
+
+func TestStampRunSessionIdentityPreservesExplicitBindings(t *testing.T) {
+	for _, target := range []string{"step", "root"} {
+		t.Run(target, func(t *testing.T) {
+			const current = "worker-b"
+			root := beads.Bead{ID: "root", Type: "molecule", Status: "open"}
+			step := beads.Bead{
+				ID: "step", Type: "step", Status: "in_progress", Assignee: current,
+				Metadata: map[string]string{
+					"gc.root_bead_id": "root", "gc.session_name": current, "gc.work_dir": "/new",
+				},
+			}
+			if target == "step" {
+				step.Metadata["gc.session_id"] = "sess-worker-a"
+				step.Metadata["gc.session_name"] = "worker-a"
+				step.Metadata["gc.work_dir"] = "/old"
+			} else {
+				root.Metadata = map[string]string{
+					"gc.session_id": "sess-worker-a", "gc.session_name": "worker-a", "gc.work_dir": "/old",
+				}
+			}
+			mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+			store := &countingStore{Store: mem}
+			sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(current, "/new")})
+
+			stampRunSessionIdentity(gaConfig(), []beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
+
+			if store.writes != 0 {
+				t.Fatalf("observability stamp changed explicit %s session binding (%d writes)", target, store.writes)
+			}
+		})
 	}
 }
 
@@ -321,7 +354,7 @@ func TestStampRunRootFromStepPreservesRootEvidenceAgainstPoolSlotCwd(t *testing.
 	mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
 	store := &countingStore{Store: mem}
 
-	stampRunRootFromStep(gaConfig(), store, step, sessionName, poolSlotSelf, true, map[string]struct{}{}, io.Discard)
+	stampRunRootFromStep(gaConfig(), store, step, "sess-"+sessionName, sessionName, poolSlotSelf, true, map[string]struct{}{}, io.Discard)
 
 	gotRoot, err := mem.Get("ga-root")
 	if err != nil {
@@ -382,5 +415,59 @@ func TestRepairPoolSlotWorkDirClobberThenStampPreservesLiveWorkDir(t *testing.T)
 	if got.Metadata[beadmeta.WorkDirMetadataKey] != liveWorkDir {
 		t.Errorf("gc.work_dir = %q, want %q (live stamp must get the last word over the repair sweep)",
 			got.Metadata[beadmeta.WorkDirMetadataKey], liveWorkDir)
+	}
+}
+
+// A pool session identified only by pool_slot (pool_managed unset) is still
+// pool-managed: isPoolManagedSessionInfo is the canonical predicate, and the
+// raw Info.PoolManaged field under-detects it.
+func TestStampRunSessionIdentityPoolSlotOnlySessionDoesNotManufactureWorktreeEvidence(t *testing.T) {
+	const (
+		sessionName = "builder-gc-slotonly"
+		baseDir     = "/home/ds/gascity-worktrees/beads/builder"
+		beadDir     = "/home/ds/gascity-worktrees/beads/builder/worktrees/be-p5su8"
+	)
+	run := beads.Bead{
+		ID: "be-p5su8", Type: "task", Status: "in_progress", Assignee: sessionName,
+		Metadata: map[string]string{"work_dir": beadDir},
+	}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{run}, nil)
+	store := &countingStore{Store: mem}
+	poolSession := stampTestSession(sessionName, baseDir)
+	poolSession.Metadata["pool_slot"] = "1"
+	sessions := newSessionBeadSnapshot([]beads.Bead{poolSession})
+
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+
+	got, err := mem.Get(run.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", run.ID, err)
+	}
+	if value, exists := got.Metadata["gc.work_dir"]; exists {
+		t.Fatalf("gc.work_dir = %q: pool base dir stamped over the bead's per-bead work_dir %q", value, beadDir)
+	}
+}
+
+func TestStampRunSessionIdentityPoolSlotOnlySessionDoesNotStampRunRootWorkDir(t *testing.T) {
+	const (
+		sessionName = "builder-gc-slotonly"
+		baseDir     = "/home/ds/gascity-worktrees/beads/builder"
+	)
+	root := beads.Bead{ID: "be-root", Type: "molecule", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}}
+	step := beads.Bead{ID: "be-step", Type: "step", Status: "in_progress", Assignee: sessionName, Metadata: map[string]string{"gc.step_ref": "wf.work", "gc.root_bead_id": "be-root"}}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+	store := &countingStore{Store: mem}
+	poolSession := stampTestSession(sessionName, baseDir)
+	poolSession.Metadata["pool_slot"] = "1"
+	sessions := newSessionBeadSnapshot([]beads.Bead{poolSession})
+
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
+
+	gotRoot, err := mem.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", root.ID, err)
+	}
+	if value, exists := gotRoot.Metadata["gc.work_dir"]; exists {
+		t.Fatalf("root gc.work_dir = %q: pool base dir propagated to the run root without ownership evidence", value)
 	}
 }

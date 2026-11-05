@@ -21,6 +21,7 @@ package main
 // cadence until it is rerouted or released.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -47,7 +48,8 @@ const (
 	releaseStrandedRepair
 	releaseOrphan // the confirmed orphan and the dead-assignee sweep: one policy
 	releaseRetired
-	releaseLadder // the work ladder's release of an unstarted claim (PHASE1-2 §6.5)
+	releaseLadder  // the work ladder's release of an unstarted claim (PHASE1-2 §6.5)
+	releaseStalled // the claim an execution-stalled stop gives back (releaseStalledClaim)
 )
 
 // laneRule says when a released claim's route counts as served.
@@ -74,7 +76,10 @@ type releasePolicy struct {
 	startedNamedKeeps bool
 	lane              laneRule
 	seatRoute         bool // the seat's route is the fallback, stamped on a routeless claim
-	pool              bool // the orphan write: live re-check, detached probe, pool release
+	pool              bool // the orphan write: live re-check, pool release
+	// detached holds a claim carrying gc.detached until its probe attests the
+	// runtime dead (detachedProbeAllowsOrphanRelease).
+	detached bool
 }
 
 var (
@@ -99,15 +104,29 @@ var (
 //     give back started work too: the seat is gone;
 //   - the work ladder gives back one in_progress claim of a live seat, which
 //     its CAS proved unstarted (PHASE1-2 §6.5); a routeless claim takes the
-//     seat's route, as drain-ack's.
+//     seat's route, as drain-ack's;
+//   - the stranded repair and both orphan releases give a claim carrying
+//     gc.detached back only once its probe attests the runtime dead: one
+//     that may still run elsewhere is kept, and the stranded repair keeps
+//     its slot for it (ReleaseOutcome.HeldDetached);
+//   - the execution-stalled stop gives back the claim it stopped the seat
+//     for under the stranded repair's rules, without the detached hold;
+//   - the other paths give a claim carrying gc.detached back unprobed. The
+//     cascade and the retired-session sweep release from a row already
+//     closed or archived: a claim they kept would stay assigned to a seat
+//     that is gone, and only the dead-assignee sweep would probe it again,
+//     on a pool route alone;
+//   - every release clears the gc.detached of the claim it gives back, in
+//     the same write (releaseServed), so no reopened claim carries a probe.
 var releasePolicies = map[releaseWhy]releasePolicy{
 	releaseKilledSeat:     {statuses: openOrStarted, startedKeeps: true, lane: laneDirect, seatRoute: true},
 	releaseDrainAck:       {statuses: startedOnly, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
 	releaseCloseCascade:   {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
-	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
-	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true},
+	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true, detached: true},
+	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true, detached: true},
 	releaseRetired:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
 	releaseLadder:         {statuses: startedOnly, lane: laneCarried, seatRoute: true},
+	releaseStalled:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
 }
 
 // Why a claim was kept or failed.
@@ -115,7 +134,7 @@ const (
 	keptStarted       = "started"
 	keptUnservedRoute = "unserved-route"
 	keptMoved         = "moved"
-	keptDetachedAlive = "detached-alive"
+	keptDetachedHeld  = "detached-held" // its gc.detached probe did not attest the runtime dead
 	failedBudget      = "budget"
 )
 
@@ -250,10 +269,28 @@ func (o ReleaseOutcome) Unserved() []strandedClaim {
 	return out
 }
 
+// HeldDetached counts the claims kept because their gc.detached probe did not
+// attest the runtime dead: work that may still run elsewhere, still assigned
+// to the seat.
+func (o ReleaseOutcome) HeldDetached() int {
+	held := 0
+	for _, k := range o.Kept {
+		if o.Why[k.bead.ID] == keptDetachedHeld {
+			held++
+		}
+	}
+	return held
+}
+
 // ReleaseClaims gives back the claims scope holds on sw's legs, as why's
 // policy says. A read that fails releases nothing on a startedKeeps path,
 // whose gate needs the whole seat; elsewhere what was read is released.
 func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why releaseWhy, opts ReleaseOpts) (ReleaseOutcome, error) {
+	if why == releaseStrandedRepair {
+		if held, err := strandedRepairHeldWork(sw, scope); err != nil || held {
+			return ReleaseOutcome{Refused: true}, errors.Join(err, errStrandedRepairHeldWork)
+		}
+	}
 	p := releasePolicies[why]
 	claims, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: p.statuses}, false)
 	if opts.Late {
@@ -319,29 +356,63 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 			out.Why[c.bead.ID] = failedBudget
 			continue
 		}
-		if p.pool {
-			assignee := strings.TrimSpace(c.bead.Assignee)
-			if !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, assignee) {
-				keep(c, keptMoved)
-				continue
-			}
-			allowed, clearDetached := detachedProbeAllowsOrphanRelease(c.bead)
-			if !allowed {
-				keep(c, keptDetachedAlive)
-				continue
-			}
-			if !releaseOrphanedPoolAssignment(c.store, c.bead, clearDetached) {
-				keep(c, keptMoved)
-				continue
-			}
-		} else if err := workAssignmentForStore(beads.WorkStore{Store: c.store}).ReleaseWorkBead(c.bead, fallback); err != nil {
+		switch kept, err := releaseServed(c, workAssignmentForStore(beads.WorkStore{Store: c.store}), p, fallback); {
+		case kept != "":
+			keep(c, kept)
+		case err != nil:
 			out.Failed = append(out.Failed, c)
 			out.Why[c.bead.ID] = err.Error()
-			continue
+		default:
+			out.Released = append(out.Released, c)
 		}
-		out.Released = append(out.Released, c)
 	}
 	return out
+}
+
+var errStrandedRepairHeldWork = errors.New("blocked or held work requires coordinated handover before stranded repair")
+
+// Unheld workflow steps remain recoverable, but a parked pair must keep its owner.
+func strandedRepairHeldWork(sw *SeatWork, scope ReleaseScope) (bool, error) {
+	q := seatWorkQuery{
+		scope: scope, statuses: seatWorkStatuses,
+		keep: func(_ beads.Store, b beads.Bead) (bool, error) {
+			return b.Status == "blocked" || beadmeta.HasDispatchHold(b.Labels), nil
+		},
+	}
+	// The legacy tick shares its census; v2 supplies a fresh per-effect read.
+	held, err := sw.snapshot(q, true)
+	return len(held) > 0, err
+}
+
+// releaseServed gives back one claim a lane serves, as p says: why it was
+// kept instead, or the error of a release that did not land. wa is the
+// claim's work store (c.store) as the assignment façade, which a release
+// outside the pool writes through. A pool release re-reads the claim live
+// first. Under p.detached a claim carrying gc.detached goes back only when
+// its probe attests the runtime dead. Every release clears the claim's
+// gc.detached in its one write: a probe left on the reopened bead would ride
+// into the claim's next assignment, where once its socket is gone it holds
+// the work for good.
+func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback string) (string, error) {
+	if p.pool && !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, strings.TrimSpace(c.bead.Assignee)) {
+		return keptMoved, nil
+	}
+	if p.detached {
+		if allowed, _ := detachedProbeAllowsOrphanRelease(c.bead); !allowed {
+			return keptDetachedHeld, nil
+		}
+	}
+	clearDetached := strings.TrimSpace(c.bead.Metadata[detachedProbeMetadataKey]) != ""
+	if p.pool {
+		if !releaseOrphanedPoolAssignment(c.store, c.bead, clearDetached) {
+			return keptMoved, nil
+		}
+		return "", nil
+	}
+	if clearDetached {
+		return "", wa.ReleaseDetachedWorkBead(c.bead, fallback)
+	}
+	return "", wa.ReleaseWorkBead(c.bead, fallback)
 }
 
 // releaseRoute is the lane a released claim is demanded and claimed through,
@@ -381,23 +452,35 @@ func namedSessionBacks(cfg *config.City, agent *config.Agent) bool {
 	return false
 }
 
-// onlyStrandedWork reports that info holds claims, and that every one would
-// stay on its closed row under the cascade's rule (no lane serves it): a
-// close may land over them, keep them and alert (O5, revised). sw's rows are
-// read first, so a served claim among them answers false with no live read;
-// only then is the seat read live, which must agree. A failed read, or no
-// claim at all, reports false.
-func onlyStrandedWork(sw *SeatWork, info sessionpkg.Info) bool {
+// onlyStrandedWork reports that every held claim is unserved under why's
+// release policy. A close may land over those claims and let its cascade
+// recover or alert on them. Both the snapshot and live read must agree;
+// a failed read, a served claim, or no claims reports false.
+func onlyStrandedWork(sw *SeatWork, info sessionpkg.Info, why releaseWhy) bool {
 	scope := releaseScope(info, sw.Legs().cfg)
 	q := seatWorkQuery{scope: scope, statuses: seatWorkStatuses}
 	seat := releaseSeatOfInfo(info)
+	policy := releasePolicies[why]
+	fallback := ""
+	if policy.seatRoute {
+		fallback = seat.fallback
+	}
 	stranded := func(hits []seatWorkHit, err error) bool {
 		if err != nil || len(hits) == 0 {
 			return false
 		}
 		return !slices.ContainsFunc(hits, func(h seatWorkHit) bool {
-			_, served := releaseRoute(sw.Legs().cfg, h.bead, seat.fallback, laneCarried)
-			return served
+			_, served := releaseRoute(sw.Legs().cfg, h.bead, fallback, policy.lane)
+			if served {
+				return true
+			}
+			if policy.pool {
+				if spec := strings.TrimSpace(h.bead.Metadata[detachedProbeMetadataKey]); spec != "" {
+					// Closing must not bypass a live or unknown detached runtime.
+					return probeDetachedWork(context.Background(), spec).Status != detachedProbeDead
+				}
+			}
+			return false
 		})
 	}
 	return stranded(sw.snapshot(q, false)) && stranded(sw.fresh(scope).match(q, false))

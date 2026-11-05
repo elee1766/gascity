@@ -8,15 +8,9 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// TestOnFormulaReassignReopensOrderClaimedBead is the end-to-end regression for
-// gastownhall/gascity#3231, mirroring the exact failing command from the
-// issue: `gc sling <pool> <bead> --on mol-polecat-work --no-convoy --reassign`.
-//
-// An order claims the bead first (status=in_progress, assignee=order:<name>);
-// without the reopen, --reassign clears the assignee but leaves the status
-// in_progress, so the routed bead never becomes a Ready candidate and no pool
-// worker can claim it. After the fix the source bead is routed to the pool AND
-// open + unassigned, i.e. claimable.
+// TestOnFormulaReassignReopensOrderClaimedBead checks that a formula-backed
+// handoff is refused without clearing the order's claim or publishing routing.
+// A source and its workflow cannot be handed off through separate writes.
 func TestOnFormulaReassignReopensOrderClaimedBead(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -34,21 +28,21 @@ func TestOnFormulaReassignReopensOrderClaimedBead(t *testing.T) {
 	opts.Reassign = true
 
 	code := doSling(opts, deps, deps.Store, stdout, stderr)
-	if code != 0 {
-		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	if code == 0 {
+		t.Fatalf("formula reassignment succeeded unexpectedly; stdout: %s", stdout.String())
 	}
 
 	source, err := deps.Store.Get("BL-42")
 	if err != nil {
 		t.Fatalf("store.Get(BL-42): %v", err)
 	}
-	if got := source.Metadata["gc.routed_to"]; got != "polecat" {
-		t.Errorf("gc.routed_to = %q, want polecat", got)
+	if got := source.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("gc.routed_to = %q, want no published route", got)
 	}
-	if source.Assignee != "" {
-		t.Errorf("Assignee = %q, want empty after --reassign (order actor must not retain pool work)", source.Assignee)
+	if source.Assignee != "order:mol-dog-jsonl" {
+		t.Errorf("Assignee = %q, want original order owner", source.Assignee)
 	}
-	if source.Status != "open" {
-		t.Errorf("Status = %q, want open after --reassign so the pool can claim it (#3231)", source.Status)
+	if source.Status != "in_progress" {
+		t.Errorf("Status = %q, want original in_progress state", source.Status)
 	}
 }

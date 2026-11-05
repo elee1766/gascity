@@ -290,11 +290,11 @@ func TestACPProtocolSigintCancelAnswersInFlightPrompt(t *testing.T) {
 		t.Fatalf("signals.jsonl = %v, want a SIGINT record", signals)
 	}
 	if out := s.peek(t); strings.Contains(out, "echo:") {
-		t.Fatalf("Peek = %q, want no echo for a cancelled turn", out)
+		t.Fatalf("Peek = %q, want no echo for a canceled turn", out)
 	}
 }
 
-// acpWireCancelled is the ACP stop reason for a cancelled turn (acp-go-sdk
+// acpWireCancelled is the ACP stop reason for a canceled turn (acp-go-sdk
 // StopReasonCancelled). The US misspell autofix must not rewrite it.
 const acpWireCancelled = "cancelled" //nolint:misspell // ACP wire value
 
@@ -365,7 +365,7 @@ func (s *protocolSession) waitPermission(t *testing.T) *runtime.PendingInteracti
 // reply, echoing wantID, with the given RequestPermissionOutcome.
 func assertPermissionReply(t *testing.T, s *protocolSession, wantID any, wantOutcome map[string]any) {
 	t.Helper()
-	// A cancelled reply is written asynchronously and can land after the
+	// A canceled reply is written asynchronously and can land after the
 	// turn settles, so wait for the fake to log it.
 	deadline := time.NewTimer(protocolWait)
 	defer deadline.Stop()
@@ -447,14 +447,14 @@ func TestACPProtocolPermissionCancelledOnInterrupt(t *testing.T) {
 	s.waitIdle(t)
 
 	if out := s.peek(t); strings.Contains(out, "echo:") || strings.Contains(out, "permission granted") {
-		t.Fatalf("Peek = %q, want the cancelled turn to produce no echo or grant", out)
+		t.Fatalf("Peek = %q, want the canceled turn to produce no echo or grant", out)
 	}
 	assertPermissionReply(t, s, 1.0, map[string]any{"outcome": "cancelled"}) //nolint:misspell // ACP wire spelling
 }
 
 func TestACPProtocolPermissionCancelledWhenAgentCancelsRequest(t *testing.T) {
 	// The fake gives up on the request, sends $/cancel_request, and finishes
-	// the turn; gc still answers the original request, cancelled. (That the
+	// the turn; gc still answers the original request, canceled. (That the
 	// answer comes from the $/cancel_request handler rather than from the turn
 	// ending is pinned by TestPermissionCancelRequestAnsweredCancelled.)
 	s := startProtocolFake(t, "--request-permission", "--permission-timeout", "50ms")
@@ -472,7 +472,7 @@ func TestACPProtocolPermissionCancelledWhenAgentCancelsRequest(t *testing.T) {
 
 func TestACPProtocolPermissionCancelledWhenTurnEnds(t *testing.T) {
 	// The fake stops waiting without $/cancel_request and ends the turn with
-	// the request still outstanding; gc answers it cancelled at turn end.
+	// the request still outstanding; gc answers it canceled at turn end.
 	s := startProtocolFake(t, "--request-permission", "--permission-timeout", "50ms", "--permission-abandon")
 	s.nudge(t, "needs approval")
 	s.waitIdle(t)
@@ -655,12 +655,12 @@ func waitForPrompt(t *testing.T, s *protocolSession) {
 	}
 }
 
-// methodCount returns how many times the fake logged method.
-func (s *protocolSession) methodCount(t *testing.T, method string) int {
+// cancelCount returns how many session/cancel calls the fake logged.
+func (s *protocolSession) cancelCount(t *testing.T) int {
 	t.Helper()
 	n := 0
 	for _, m := range s.methods(t) {
-		if m == method {
+		if m == methodSessionCancel {
 			n++
 		}
 	}
@@ -685,7 +685,7 @@ func TestACPProtocolInterruptSettlesBySessionCancel(t *testing.T) {
 	if s.conn(t).isBusy() {
 		t.Fatal("turn still busy after Interrupt returned")
 	}
-	if n := s.methodCount(t, methodSessionCancel); n != 1 {
+	if n := s.cancelCount(t); n != 1 {
 		t.Fatalf("methods.jsonl has %d session/cancel, want 1 (%v)", n, s.methods(t))
 	}
 	if signals := s.jsonlRecords(t, "signals.jsonl"); len(signals) != 0 {
@@ -704,7 +704,7 @@ func TestACPProtocolInterruptIdleSendsNothing(t *testing.T) {
 	if !s.conn(t).alive() {
 		t.Fatal("fake exited: an idle Interrupt must not signal")
 	}
-	if n := s.methodCount(t, methodSessionCancel); n != 0 {
+	if n := s.cancelCount(t); n != 0 {
 		t.Fatalf("idle Interrupt sent %d session/cancel", n)
 	}
 	if signals := s.jsonlRecords(t, "signals.jsonl"); len(signals) != 0 {

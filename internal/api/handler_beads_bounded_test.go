@@ -145,6 +145,35 @@ func TestBeadListAllTrueBoundsCounterStore(t *testing.T) {
 	}
 }
 
+// TestBeadListAllTrueUpdatedSinceBoundsHistory verifies updated_since reaches
+// both the bounded List and the Count, so Total and the page agree, and that a
+// malformed timestamp is rejected rather than silently ignored.
+func TestBeadListAllTrueUpdatedSinceBoundsHistory(t *testing.T) {
+	const total = 30
+	fs := newFakeState(t)
+	_, mem := seedMoleculeStore("gc", total)
+	fs.stores["myrig"] = &countingListStore{Store: mem}
+
+	// seedMoleculeStore spaces CreatedAt one minute apart from this base and
+	// leaves UpdatedAt zero, so the cutoff keeps the last 10 rows.
+	cutoff := time.Date(2026, 6, 1, 0, 20, 0, 0, time.UTC)
+	body := fetchBoundedBeads(t, fs, "?type=molecule&all=true&limit=5&updated_since="+cutoff.Format(time.RFC3339))
+	if body.Total != 10 {
+		t.Errorf("Total = %d, want 10", body.Total)
+	}
+	if len(body.Items) != 5 || body.Items[0].ID != "gc-mol-029" {
+		t.Fatalf("Items = %+v, want 5 rows starting at gc-mol-029", body.Items)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest("GET", cityURL(fs, "/beads")+"?all=true&updated_since=7d", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("malformed updated_since status = %d, want 400 (body=%q)", rec.Code, rec.Body.String())
+	}
+}
+
 // TestBeadListAllTrueNoCursorWhenAllFit verifies a page that covers the whole
 // result set carries no continuation cursor.
 func TestBeadListAllTrueNoCursorWhenAllFit(t *testing.T) {

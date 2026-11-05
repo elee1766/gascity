@@ -106,6 +106,9 @@ type controllerState struct {
 	cacheCtx      context.Context
 	beadStores    map[string]beads.Store
 	cityBeadStore beads.Store // city-level store for session beads
+	// stores is the class handles over cityBeadStore and storageRoutes,
+	// re-minted when they change (city_stores.go).
+	stores storesEpochCache
 	// storageRoutes is the opened non-work storage binding the city runtime
 	// resolved at boot: a constructor input, written once in
 	// newControllerStateWithRoutes and never reassigned, so reads are lock-free
@@ -130,7 +133,7 @@ type controllerState struct {
 	pokeCh                 chan struct{}   // wakeOf's fallback when no wake is wired; triggers immediate reconciler tick
 	controlDispatcherCh    chan struct{}   // wakeOf's fallback when no wake is wired; triggers the control-dispatcher-only reconcile
 	configDirty            *atomic.Bool    // optional dirty flag shared with the reconciler reload path
-	freshness              configFreshness // reloads and API config writes in progress, for ReadyWork
+	freshness              configFreshness // reloads and API config writes in progress, for ReadyWork and ActiveWorkStep
 	services               workspacesvc.Registry
 	extmsgSvc              *extmsg.Services
 	adapterReg             *extmsg.AdapterRegistry
@@ -376,32 +379,37 @@ func newControllerStateWithRoutes(
 		cs.cityBeadStore = wrapWithCachingStoreFeed(ctx, store, ep, true, cs.ledgerFeedRequest(cfg, ledgerFeedCityScope, cs.cityScopeGate()), cs.reconcileGate())
 		cs.cityBeadsDiagnostic = diagnosticPtr(opened.Diagnostic)
 		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
-		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
+		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cityPath)
 	}
 	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
 	return cs
 }
 
-// wrapWithCachingStore wraps store in an in-memory read cache. When
-// backgroundRefresh is true the cache pre-primes active beads, fully primes
-// and runs a continuous reconcile loop (the steady-state cost: one bd
-// subprocess per cycle per scope). When false it does none of that: reads go
-// to bd on demand. Suspended rigs pass false: they spawn no agents, so nothing
-// writes locally, and gc must not touch a suspended scope at all — any bd read
-// restarts its retired proxy and Dolt (gastownhall/gascity #1978 follow-up,
-// #6561). The cache never tails a journal: wrapWithCachingStoreFeed builds
-// one that does.
-func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, opts ...beads.CachingStoreOption) beads.Store {
-	return wrapWithCachingStoreFeed(ctx, store, ep, backgroundRefresh, nil, opts...)
+// wrapWithCachingStore wraps store in an in-memory read cache. With a
+// cancellable ctx the cache runs a continuous reconcile loop (the steady-state
+// cost: one bd subprocess per cycle per scope) for its whole life. When prime
+// is true the cache also pre-primes active beads and fully primes before that
+// loop starts. When false it is left cold: nothing reads the scope at wrap,
+// and the reconcile loop's first admitted cycle loads it. Rigs suspended when
+// their store is built pass false with a reconcile gate that is closed while
+// the rig is suspended (rigReconcileGate): gc must not touch a suspended scope
+// at all, since any bd read restarts its retired proxy and Dolt
+// (gastownhall/gascity #1978 follow-up, #6561), yet a rig resumed later must
+// get a refreshing cache without a supervisor restart. The cache never tails a
+// journal: wrapWithCachingStoreFeed builds one that does.
+func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Provider, prime bool, opts ...beads.CachingStoreOption) beads.Store {
+	return wrapWithCachingStoreFeed(ctx, store, ep, prime, nil, opts...)
 }
 
 // wrapWithCachingStoreFeed is wrapWithCachingStore that also tails the
 // scope's journal when feed asks for it and the scope can be tailed
 // (attachLedgerFeed). The journal head is read before PrimeActive, so a
 // mutation committed between the two is both primed and delivered, and the
-// feed runs until the cache is stopped.
-func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, feed *ledgerFeedRequest, opts ...beads.CachingStoreOption) beads.Store {
+// feed runs until the cache is stopped. A cold cache's feed reads the head
+// through its gate: while the scope is gated the baseline is late, and the
+// feed takes it once the gate opens and then forces a re-scan.
+func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.Provider, prime bool, feed *ledgerFeedRequest, opts ...beads.CachingStoreOption) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
 	if baseStore == nil {
 		return nil
@@ -413,7 +421,7 @@ func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.
 	if ep != nil {
 		recorder = ep
 	}
-	attached := attachLedgerFeed(ctx, feed, baseStore, backgroundRefresh)
+	attached := attachLedgerFeed(ctx, feed, baseStore)
 	cs := beads.NewCachingStore(baseStore, attached.observe(cacheChangeRecorder(recorder)), opts...)
 	if attached != nil {
 		attached.bind(ctx, feed.set, cs)
@@ -421,25 +429,32 @@ func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.
 	// Pre-prime active beads synchronously (~1-2s, indexed queries).
 	// Loads open + in_progress beads — enough for the startup path
 	// (adoption, session snapshot, desired state) so the city can
-	// reach "ready" without waiting for the full prime. A suspended rig
-	// (no background refresh) is not primed at all: it is left cold, and
-	// any read it does get goes to bd on demand.
-	if backgroundRefresh {
+	// reach "ready" without waiting for the full prime. A cold cache
+	// (suspended rig) is not primed: any read it gets before its first
+	// reconcile goes to bd on demand.
+	if prime {
 		if err := cs.PrimeActive(); err != nil {
 			log.Printf("caching-store: pre-prime failed: %v", err)
 		}
 	}
-	// No cancellable ctx, or caller opted out of background refresh (suspended
-	// rig): serve from the synchronous pre-prime only, no async prime/reconcile.
-	if ctx.Done() == nil || !backgroundRefresh {
+	// No cancellable ctx: serve from the synchronous pre-prime only, no async
+	// prime/reconcile.
+	if ctx.Done() == nil {
 		if policyWrapped {
 			return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
 		}
 		return cs
 	}
-	// Full prime runs async — backfills remaining beads for List()
-	// callers (convergence reconcile, sweep, API handlers).
-	go primeThenStartReconciler(ctx, cs, os.Getenv("GC_AGENT"))
+	if prime {
+		// Full prime runs async — backfills remaining beads for List()
+		// callers (convergence reconcile, sweep, API handlers).
+		go primeThenStartReconciler(ctx, cs, os.Getenv("GC_AGENT"))
+	} else {
+		// The full prime is ungated, so a cold cache skips it: its first
+		// reconcile, held by the gate while the scope is suspended, loads
+		// the same snapshot and promotes it live.
+		cs.StartReconciler(ctx, beads.WithStaggerAuto(), os.Getenv("GC_AGENT"))
+	}
 	attached.start(ctx)
 	if policyWrapped {
 		return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
@@ -470,11 +485,16 @@ func primeThenStartReconciler(ctx context.Context, cs *beads.CachingStore, agent
 
 // buildStores creates bead stores for each rig in cfg.
 // Mail providers are NOT built here — all mail uses the city-level store.
-// Does not read or write mutable cs fields (safe to call unlocked); reads
-// the runtime suspension state file to gate per-rig cache refresh.
+// Does not read or write mutable cs fields other than the atomic
+// suspendedRigs (safe to call unlocked); reads the runtime suspension state
+// file to gate per-rig cache refresh.
 func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store {
 	cityProvider := rawBeadsProviderForScope(cs.cityPath, cs.cityPath)
 	suspState := loadSuspensionStateBestEffort(cs.cityPath)
+	// A cold rig cache's reconcile loop and feed are gated by suspendedRigs.
+	// Publish the state this build saw before wrapping, so a rig suspended
+	// since the last tick is not admitted by a stale gate.
+	cs.setSuspendedRigs(buildEffectiveSuspendedRigNames(cfg, suspState))
 	stores := make(map[string]beads.Store, len(cfg.Rigs))
 
 	var sharedLegacyFileStore beads.Store
@@ -530,17 +550,14 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 	return stores
 }
 
-// rigStoreBackgroundRefresh reports whether the controller should run
-// the continuous cache refresh (async full prime + watchdog reconciler)
-// for a rig's bead store. Suspended rigs skip it: they spawn no agents,
-// so nothing writes locally and reconciling them every cycle is pure
-// cost (gastownhall/gascity #1978 follow-up). Suspension here is the
+// rigStoreBackgroundRefresh reports whether a rig's bead store is primed
+// when it is built. Suspended rigs are left cold: they spawn no agents, so
+// nothing writes locally, and priming would read the suspended scope
+// (gastownhall/gascity #1978 follow-up). Their reconcile loop and feed still
+// run, held by rigReconcileGate until the rig resumes. Suspension here is the
 // EFFECTIVE state — the runtime suspend/resume override layered over the
 // rig's committable suspended_on_start default — not the deprecated raw
-// [[rigs]] suspended field alone. Gating on the raw field misfires both
-// ways: a rig resumed at runtime keeps refreshing only by accident of
-// which config spelling it used, and a suspended_on_start rig never gets
-// the skip at all.
+// [[rigs]] suspended field alone.
 func rigStoreBackgroundRefresh(suspState suspensionstate.State, rig config.Rig) bool {
 	return !suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart())
 }
@@ -641,6 +658,13 @@ func (cs *controllerState) setBeadsQuiescent(quiescent bool) {
 // openRigStore creates a bead store for a rig path using the given provider.
 func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string, cfg *config.City) beads.Store {
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
+	if provider == sqliteWorkProvider {
+		store, err := openSQLiteWorkScope(scopeRoot, cs.cityPath, false)
+		if err != nil {
+			return unavailableStore{err: fmt.Errorf("open native rig store %s: %w", scopeRoot, err)}
+		}
+		return wrapStoreWithBeadPolicies(store, cfg)
+	}
 	openExecStore := func() (beads.Store, error) {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
 		env := gcExecStoreEnv(cs.cityPath, execStoreTarget{
@@ -910,17 +934,26 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 	cs.mu.RLock()
 	stores := []beads.Store{
 		resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv),
-		cs.cityBeadStore,
+		// The city leg is a work leg (the split-strict gate's work view;
+		// identity in production).
+		splitStrictWorkView(cs.cityBeadStore),
 	}
 	// A suspended rig is not swept: it runs nothing, and a bd read restarts
 	// its retired proxy and Dolt.
 	suspendedRigs := buildEffectiveSuspendedRigNames(cs.cfg, loadSuspensionStateBestEffort(cs.cityPath))
+	// On a split city a rig's workflow roots live in the binding (the S4
+	// placement rule), which leads this list. A rig store is swept only while
+	// it may still hold pre-S4 roots; once the rig is proven relic-free its
+	// store holds only work and is not scanned.
 	rigStores := make(map[string]beads.Store, len(cs.beadStores))
 	for name, store := range cs.beadStores {
 		if suspendedRigs[name] {
 			continue
 		}
-		rigStores[name] = store
+		if splitRigGraphRelicFree(cs.storageRoutes, name) {
+			continue
+		}
+		rigStores[name] = splitStrictWorkView(store)
 	}
 	cs.mu.RUnlock()
 
@@ -1051,11 +1084,20 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	wake := cs.wakeOf()
 	cs.mu.RLock()
 	stores := cs.beadEventStoresLocked(id)
+	probe := cs.beadEventRelicProbeLocked(id)
 	var storeRef string
 	if evt.Type == events.BeadClosed {
 		storeRef = cs.autocloseStoreRefLocked(evt.Subject)
 	}
 	cs.mu.RUnlock()
+	relic, residentProven := probe.residentStore(id)
+	if residentProven {
+		// A relic's events also belong to the binding that holds it. It is
+		// ADDED to the prefix route, not substituted for it: a work bead that
+		// reuses the relic's id (bd reuses ids) keeps its own cache and its own
+		// autoclose, and each close is autoclosed in the store whose row it is.
+		stores = withRelicStore(stores, relic)
+	}
 
 	// A cache event (either actor) carries a CachingStore's own post-absorb
 	// snapshot, dependencies included, rather than a bd hook patch. Saying so
@@ -1066,6 +1108,13 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	snapshot := isCacheActor(evt.Actor)
 	for _, store := range stores {
 		if cached, ok := store.(*beads.CachingStore); ok {
+			// A relic's id is outside every namespace the binding cache
+			// filters events on; its residence was just proved, so the event
+			// is applied past that filter.
+			if residentProven && sameBeadStore(store, relic) {
+				cached.ApplyResidentEventSnapshot(evt.Type, evt.Payload)
+				continue
+			}
 			// A class binding's out-of-process writers are one-shot CLIs, whose
 			// emitter snapshots the row with its edges. Applied as a bd hook
 			// patch, a snapshot of an edge-less row (no dependencies key, from
@@ -1079,13 +1128,57 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 		}
 	}
 	wake.OnBeadEvent(evt, snapshot)
+	// The reads after the cache application (autoclose) see the event's
+	// stores as the split-strict test gate's views (identity in production).
+	stores, relic = splitStrictEventStores(id, stores, relic)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		if evt.Actor == cacheLocalActor {
-			cs.applyCommittedClose(evt, stores[0], storeRef)
+			owner := stores[0]
+			if residentProven {
+				owner = committedCloseOwner(stores, evt.Subject)
+			}
+			cs.applyCommittedClose(evt, owner, relicStoreRef(owner, relic, storeRef))
 			return
 		}
-		beadCloseAutocloseDispatch(cs.trackStoreWork(func() { cs.applyInferredClose(evt, stores, storeRef) }))
+		beadCloseAutocloseDispatch(cs.trackStoreWork(func() { cs.applyInferredClose(evt, stores, storeRef, relic) }))
 	}
+}
+
+// withRelicStore returns stores plus relic, the binding the residence probe
+// proved holds the id, unless stores already holds it.
+//
+// residency:allow — appends the one owner the by-id residency plan proved to
+// the watcher's prefix-route apply set; it resolves nothing itself.
+func withRelicStore(stores []beads.Store, relic beads.Store) []beads.Store {
+	for _, s := range stores {
+		if sameBeadStore(s, relic) {
+			return stores
+		}
+	}
+	return append(append(make([]beads.Store, 0, len(stores)+1), stores...), relic)
+}
+
+// relicStoreRef is the autoclose store-ref for a close whose row lives in
+// owner: the ID-only mode ("") relocated ids use when owner is the relic's
+// binding, else the prefix route's own ref.
+func relicStoreRef(owner, relic beads.Store, prefixRef string) string {
+	if relic != nil && sameBeadStore(owner, relic) {
+		return ""
+	}
+	return prefixRef
+}
+
+// committedCloseOwner picks, for a committed close of an id more than one
+// store may hold (a relic and a work bead reusing its id), the store whose
+// row reads closed, in the stores' order; stores[0] when none does or a read
+// fails. stores must be non-empty.
+func committedCloseOwner(stores []beads.Store, id string) beads.Store {
+	for _, store := range stores {
+		if b, err := beads.HandlesFor(store).Live.Get(id); err == nil && b.Status == "closed" {
+			return store
+		}
+	}
+	return stores[0]
 }
 
 // applyCommittedClose runs a committed bead.closed's durable effects: the
@@ -1122,16 +1215,17 @@ func (cs *controllerState) applyCommittedClose(evt events.Event, store beads.Sto
 // is a claim anyone who can append to the event log could make. The
 // fact derives from the live read, never from the payload. A row that is open
 // or gone gets nothing. An unreadable row gets nothing yet: the autoclose
-// sweep re-reads it, and the completions sweep backstops its fact.
-func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.Store, storeRef string) {
+// sweep re-reads it, and the completions sweep backstops its fact. For a
+// relic's id the read is the row that reads closed (liveCloseOwner).
+func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.Store, storeRef string, relic beads.Store) {
 	if cs.deferIfQuiescent(evt.Subject) {
 		return
 	}
-	store, live, err := liveReadOwner(stores, evt.Subject)
+	store, live, err := liveCloseOwner(stores, evt.Subject, relic)
 	switch confirmInferredClose(live, err) {
 	case closeConfirmed:
 		cs.emitCompletedFact(live, evt.Actor)
-		finished := cs.beadCloseAutoclose(evt.Subject, store, storeRef)()
+		finished := cs.beadCloseAutoclose(evt.Subject, store, relicStoreRef(store, relic, storeRef))()
 		cs.autocloseSweepOf().settle(evt.Subject, finished, time.Now())
 	case closeUnconfirmed:
 		cs.autocloseSweepOf().settle(evt.Subject, false, time.Now())
@@ -1164,11 +1258,48 @@ func liveReadOwner(stores []beads.Store, id string) (beads.Store, beads.Bead, er
 	return stores[0], beads.Bead{}, err
 }
 
+// liveCloseOwner is liveReadOwner for the read that confirms a close of id.
+// relic is the binding the residence probe added beside the prefix route
+// (withRelicStore), nil when it added none. With a relic, two stores may hold
+// a row under id (a work bead that reuses the relic's id), so the first row
+// found need not be the one that closed: the owner is the first store whose
+// row reads closed, as committedCloseOwner picks it for a committed close. A
+// read that fails before one does is returned (the close is unconfirmed);
+// when every store answers and no row reads closed, the first row found, or
+// ErrNotFound, refutes it. stores must be non-empty.
+func liveCloseOwner(stores []beads.Store, id string, relic beads.Store) (beads.Store, beads.Bead, error) {
+	if relic == nil {
+		return liveReadOwner(stores, id)
+	}
+	var openStore beads.Store
+	var open beads.Bead
+	for _, store := range stores {
+		// A first-owner probe over the prefix route and the binding the
+		// residence probe proved holds the id: a relic's row lives in one.
+		var b beads.Bead
+		err := beads.FederatedRead(func() (err error) {
+			b, err = beads.HandlesFor(store).Live.Get(id)
+			return err
+		})
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+		case err != nil || b.Status == "closed":
+			return store, b, err
+		case openStore == nil:
+			openStore, open = store, b
+		}
+	}
+	if openStore == nil {
+		return stores[0], beads.Bead{}, beads.ErrNotFound
+	}
+	return openStore, open, nil
+}
+
 // emitCompletedFact records step's execution.step_completed once per fact,
 // through the delta pass's idempotency record, so a replayed or re-inferred
 // close is not a second fact.
 func (cs *controllerState) emitCompletedFact(step beads.Bead, actor string) {
-	cs.completionsDeltaIndex.EmitCompleted(cs.closeRecorder(), cs.GraphBeadStore().Store, step, actor)
+	cs.completionsDeltaIndex.EmitCompleted(cs.closeRecorder(), cs.GraphBeadStore(), step, actor)
 }
 
 func (cs *controllerState) closeRecorder() events.Recorder {
@@ -1249,9 +1380,10 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 	// co-residence with the closed bead. On a single-store city GraphBeadStore()
 	// returns the same store, so this is identity today.
 	graphStore := cs.GraphBeadStore()
+	homes := cs.convoyAutocloseHomes(store, graphStore.Store)
 	return func() bool {
 		for attempt := 1; ; attempt++ {
-			run := doConvoyAutocloseWith(store, rec, beadID, os.Stderr, os.Stderr)
+			run := doConvoyAutocloseWith(store, homes, rec, beadID, os.Stderr, os.Stderr)
 			run.merge(doWispAutocloseWith(store, beadID, os.Stderr, graphStore))
 			run.merge(doMoleculeAutocloseWith(store, storeRef, rec, beadID, os.Stderr, graphStore))
 			if !run.refused || attempt >= autocloseRefusalAttempts {
@@ -1261,9 +1393,138 @@ func (cs *controllerState) beadCloseAutoclose(beadID string, store beads.Store, 
 	}
 }
 
+// convoyAutocloseHomes is where the convoy autoclose of a row closed in store
+// finds what store does not hold on a split city:
+//
+//   - A closed class row's legacy parent can be work class (a convoy, a work
+//     bead a graph root was poured under), which lives on the work ledger, not
+//     beside the row. The row's own store is read first (doConvoyAutocloseWith),
+//     then this work home: the rig whose prefix the parent id carries, else the
+//     city.
+//   - A work convoy's legacy children can be graph rows in the class binding
+//     (graph), counted too once every work child is terminal.
+//
+// A work store's own rows keep their parent beside them, and a city that
+// relocates nothing has no binding, so a single-store city reads exactly what
+// it read before.
+func (cs *controllerState) convoyAutocloseHomes(store, graph beads.Store) convoyAutocloseHomes {
+	var homes convoyAutocloseHomes
+	cs.mu.RLock()
+	cityRaw := cs.cityBeadStore
+	cs.mu.RUnlock()
+	if graph != nil && !sameBeadStore(graph, cityRaw) && !sameBeadStore(graph, store) {
+		homes.children = graph
+	}
+	city := cs.CityBeadStore()
+	rigs := cs.BeadStores() // residency:allow — the controller's own work stores, compared against store and keyed by rig name for the prefix table below; no leg list is built
+	if store == nil || sameBeadStore(store, city) || sameBeadStore(store, cityRaw) {
+		return homes
+	}
+	for _, rig := range rigs {
+		if sameBeadStore(store, rig) {
+			return homes
+		}
+	}
+	type rigPrefix struct{ prefix, name string }
+	var prefixes []rigPrefix
+	cs.mu.RLock()
+	if cs.cfg != nil {
+		for _, rig := range cs.cfg.Rigs {
+			if prefix := rig.EffectivePrefix(); prefix != "" {
+				prefixes = append(prefixes, rigPrefix{prefix + "-", rig.Name})
+			}
+		}
+	}
+	cs.mu.RUnlock()
+	// Longest prefix first, so a rig whose prefix extends another's wins.
+	sort.SliceStable(prefixes, func(i, j int) bool { return len(prefixes[i].prefix) > len(prefixes[j].prefix) })
+	homes.parent = func(id string) beads.Store {
+		if bdIDIsClassReserved(id) { // residency:allow — a binding-minted parent id has no work-ledger home; the by-id read stays on the row's own store
+			return nil
+		}
+		for _, p := range prefixes {
+			if strings.HasPrefix(id, p.prefix) {
+				if rig := rigs[p.name]; rig != nil {
+					return rig
+				}
+			}
+		}
+		return city
+	}
+	return homes
+}
+
+// beadEventStores is beadEventStoresLocked plus the residence probe for a
+// migrated id (beadEventRelicProbeLocked): the stores a bead event for id is
+// applied to. It takes cs.mu itself and probes outside it.
+//
+// residency:allow — the event watcher's apply set (beadEventStoresLocked's
+// prefix table) plus the binding the by-id residency plan proved holds the id.
+func (cs *controllerState) beadEventStores(id string) []beads.Store {
+	cs.mu.RLock()
+	stores := cs.beadEventStoresLocked(id)
+	probe := cs.beadEventRelicProbeLocked(id)
+	cs.mu.RUnlock()
+	if relic, ok := probe.residentStore(id); ok {
+		return withRelicStore(stores, relic)
+	}
+	return stores
+}
+
+// beadEventRelicProbe is the residence probe a bead event for a work-shaped
+// id takes on a city that relocates its infrastructure classes (R4).
+//
+// `gc storage migrate` carries infrastructure beads into the binding with
+// their ORIGINAL ids, so on a migrated city an HQ- or rig-prefixed id can be
+// resident in the binding — a "relic" — and its prefix names the wrong store.
+// Routed by prefix alone, a relic's events reached only the work cache: the
+// binding cache went stale until its rescan, and a close read the work store,
+// missed, was refuted, and the relic molecule never autoclosed. Reserved ids
+// (gcg-* and the other class namespaces) already route to the binding by
+// prefix; this is the half for the ids a prefix cannot place.
+//
+// The probe is the by-id residency plan's binding half
+// (byIDBindingOwnerForTopology), over the routes the controller opened at
+// boot. A binding the boot census certified relic-free is not read at all, so
+// a born-split city pays nothing; a migrated one pays one binding read per
+// work-shaped event. The zero value probes nothing.
+type beadEventRelicProbe struct {
+	routes *storageRoutes
+}
+
+// beadEventRelicProbeLocked returns the probe a bead event for id needs, or
+// the zero probe when it needs none: a city that relocates nothing, or an id
+// inside a reserved class namespace. cs.mu must be held.
+func (cs *controllerState) beadEventRelicProbeLocked(id string) beadEventRelicProbe {
+	if id == "" || cs.storageRoutes == nil || len(cs.storageRoutes.stores) == 0 || bdIDIsClassReserved(id) { // residency:allow — reserved ids already route by prefix; this only decides whether to probe
+		return beadEventRelicProbe{}
+	}
+	return beadEventRelicProbe{routes: cs.storageRoutes}
+}
+
+// residentStore reports the binding store that holds id, when the probe
+// proves one does. A probe that cannot decide (a binding read that failed)
+// keeps the prefix route: the event is not lost, the sweep re-reads a close,
+// and the binding's rescan catches an update.
+func (p beadEventRelicProbe) residentStore(id string) (beads.Store, bool) {
+	if p.routes == nil {
+		return nil, false
+	}
+	bindings, refused := residencyBindingsFromRoutes(p.routes)
+	if refused != nil || len(bindings) == 0 {
+		return nil, false
+	}
+	owner, ok, err := byIDBindingOwnerForTopology(claimRouteTopology(bindings, nil), id)
+	if err != nil || !ok || owner.Store == nil {
+		return nil, false
+	}
+	return owner.Store, true
+}
+
 // beadEventStoresLocked returns the stores a bead event for id is applied to:
 // the store whose configured prefix owns id, or every store when no configured
-// prefix does. id must already be canonical (see beads.BeadEventID).
+// prefix does. id must already be canonical (see beads.BeadEventID). It does
+// not probe residence; beadEventStores is the form that does.
 func (cs *controllerState) beadEventStoresLocked(id string) []beads.Store {
 	if id != "" && cs.cfg != nil {
 		if store, known := cs.beadEventConfiguredStoreLocked(id); known {
@@ -1281,6 +1542,13 @@ func (cs *controllerState) beadEventStoresLocked(id string) []beads.Store {
 	if cs.cityBeadStore != nil {
 		stores = append(stores, cs.cityBeadStore)
 	}
+	// The relocated binding is deliberately not part of this broadcast
+	// (ga-s1ms9). An id-less payload carries nothing any cache can apply
+	// (CachingStore.applyEvent drops a payload with no id), and the binding
+	// cache's namespace filter drops an id no reserved namespace owns. The one
+	// unowned id the binding can hold is a migrated relic, and the residence
+	// probe (beadEventRelicProbeLocked) routes it there with its residence
+	// proved, past that filter.
 	return stores
 }
 
@@ -1369,7 +1637,7 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	if cityStore != nil {
 		cityStore = wrapWithCachingStoreFeed(cs.cacheCtx, cityStore, cs.eventProv, true, cs.ledgerFeedRequest(cfg, ledgerFeedCityScope, cs.cityScopeGate()), cs.reconcileGate())
 		cityMailProv = newCityMailProvider(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
-		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cfg, cs.cityPath, cs.eventProv)
+		extSvc = newCityExtMsgServices(cs.storageRoutes, cityStore, cs.cityPath)
 	}
 
 	// Swap under short critical section.
@@ -1886,6 +2154,18 @@ func (cs *controllerState) MaintenanceLoop() api.MaintenanceProvider {
 	return cs.maintenanceLoop
 }
 
+// ApplyStartupPrompt implements api.State: it returns hints with the startup
+// prompt of the session described by info delivered for a launch that resumes it.
+// The controller renders the prompt and applies the same delivery plan the
+// reconciler launches with, so an API-resumed session cannot diverge from it.
+func (cs *controllerState) ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error) {
+	cfg := cs.Config()
+	if cfg == nil {
+		return hints, nil
+	}
+	return startupPromptCity{path: cs.CityPath(), cfg: cfg, stderr: os.Stderr}.applyTo(info, resolved, transport, hints)
+}
+
 // Config returns the current city config snapshot.
 func (cs *controllerState) Config() *config.City {
 	cs.mu.RLock()
@@ -1911,7 +2191,7 @@ func (cs *controllerState) SessionProvider() runtime.Provider {
 func (cs *controllerState) BeadStore(rig string) beads.Store {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.beadStores[rig]
+	return splitStrictWorkView(cs.beadStores[rig])
 }
 
 // BeadStores returns all rig names and their stores, including the HQ city store.
@@ -1928,7 +2208,7 @@ func (cs *controllerState) BeadStores() map[string]beads.Store {
 	for k, v := range cs.beadStores {
 		m[k] = v
 	}
-	return m
+	return splitStrictWorkViews(m)
 }
 
 // MailProvider returns the city-level mail provider.
@@ -2078,7 +2358,7 @@ func (cs *controllerState) RawConfig() *config.City {
 func (cs *controllerState) CityBeadStore() beads.Store {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.cityBeadStore
+	return splitStrictWorkView(cs.cityBeadStore)
 }
 
 // ScopedStoreLike implements api.State. See the interface doc comment for
@@ -2093,19 +2373,12 @@ func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.S
 	return scopedStoreLike(ctx, cityPath, cfg, existing)
 }
 
-// NudgesBeadStore returns the store backing the nudge-queue shadow beads. At the
-// default backend resolveNudgesStore returns cityBeadStore, so this is byte-identical
-// to CityBeadStore; when [beads.classes.nudges] is relocated it returns the per-class
-// store. cs.eventProv is passed for signature parity with the other accessors and is
-// ignored by resolveNudgesStore; the controller's emission comes from the CachingStore
-// around each store it serves (class_store_cache.go), not from this argument. The
-// result is wrapped in the
-// strongly-typed beads.NudgesStore so the nudges class is statically visible to callers;
-// the wrapper carries the same underlying store value, so runtime behavior is unchanged.
+// NudgesBeadStore returns the store backing the nudge-queue shadow beads: the
+// binding when the routes relocate nudges, else the city work store. The
+// controller's emission comes from the CachingStore around each store it serves
+// (class_store_cache.go).
 func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return beads.NudgesStore{Store: resolveNudgesStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return cs.Stores().Nudges()
 }
 
 // NudgeQueue returns the city's nudge queue over its nudges-class store, for the
@@ -2114,49 +2387,25 @@ func (cs *controllerState) NudgeQueue() api.NudgeQueue {
 	return openNudgeQueue(cs.cityPath, cs.NudgesBeadStore()).Queue
 }
 
-// SessionsBeadStore returns the store backing session-class beads. At the default
-// backend resolveSessionStore returns cityBeadStore, so this is byte-identical to
-// CityBeadStore; when [beads.classes.sessions] is relocated it returns the per-class
-// store. cs.eventProv is passed for signature parity and ignored by
-// resolveSessionStore, exactly as it is for every other class. The
-// result is wrapped in the strongly-typed beads.SessionStore so the session class is
-// statically visible to callers; the wrapper carries the same underlying store value,
-// so runtime behavior is unchanged.
+// SessionsBeadStore returns the store backing session-class beads: the binding
+// when the routes relocate sessions, else the city work store.
 func (cs *controllerState) SessionsBeadStore() beads.SessionStore {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return beads.SessionStore{Store: resolveSessionStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return cs.Stores().Sessions()
 }
 
-// GraphBeadStore returns the store backing graph-class beads. At the default backend
-// resolveGraphStore returns cityBeadStore, so this is byte-identical to CityBeadStore;
-// when [beads.classes.graph] is relocated it returns the dedicated graph store at the
-// legacy .gc/beads.sqlite location (or the gcg Postgres schema). cs.eventProv is
-// passed for signature parity with the other accessors but is ignored by
-// resolveGraphStore, as it is for every class: on this side the controller's
-// CachingStore over the binding is the emitter (class_store_cache.go). The
-// one-shot CLI's side is covered by class_store_emit.go. The result is wrapped in
-// the strongly-typed beads.GraphStore so the
-// graph class is statically visible to callers; the wrapper carries the same
-// underlying store value, so runtime behavior is unchanged.
+// GraphBeadStore returns the store backing graph-class beads: the binding when
+// the routes relocate graph, else the city work store. On this side the
+// controller's CachingStore over the binding is the emitter
+// (class_store_cache.go); the one-shot CLI's is class_store_emit.go.
 func (cs *controllerState) GraphBeadStore() beads.GraphStore {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return beads.GraphStore{Store: resolveGraphStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return cs.Stores().Graph()
 }
 
-// OrdersBeadStore returns the store backing orders-class beads. At the default
-// backend resolveOrderStore returns cityBeadStore, so this is byte-identical to
-// CityBeadStore; when [beads.classes.orders] is relocated it returns the
-// per-class store, which is the store the order dispatcher creates every
-// tracking bead in. cs.eventProv is the recorder, matching the nudges/sessions
-// wiring. The result is wrapped in the strongly-typed beads.OrdersStore so the
-// orders class is statically visible to callers; the wrapper carries the same
-// underlying store value, so runtime behavior is unchanged.
+// OrdersBeadStore returns the store backing orders-class beads: the binding
+// when the routes relocate orders, else the city work store. It is the store
+// the order dispatcher creates every tracking bead in.
 func (cs *controllerState) OrdersBeadStore() beads.OrdersStore {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return beads.OrdersStore{Store: resolveOrderStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return cs.Stores().Orders()
 }
 
 // ClassBindingHasLegacyResidents replays the boot census for one binding store.
@@ -3058,7 +3307,10 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
-		PrepareAdopt:  prepareRigAdoptProviderState,
+		PrepareAdopt: prepareRigAdoptProviderState,
+		ReadStorePrefix: func(p string) (string, error) {
+			return rigAdoptStorePrefix(cs.cityPath, p)
+		},
 		StoreContract: cityUsesBdStoreContract,
 		DoltSkip:      gcDoltSkip,
 		OnStep:        depOnStep,
@@ -3657,4 +3909,15 @@ func (cs *controllerState) AdapterRegistry() *extmsg.AdapterRegistry {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.adapterReg
+}
+
+// RigGraphRelicFree reports whether rig's own store is proven to hold no graph
+// row (the S4 relic-free predicate), so API readers may skip it as a graph
+// leg. A city that relocates nothing answers false: there the rig store IS
+// where the rig's graph rows live, and nothing is skipped.
+func (cs *controllerState) RigGraphRelicFree(rig string) bool {
+	cs.mu.RLock()
+	routes := cs.storageRoutes
+	cs.mu.RUnlock()
+	return splitRigGraphRelicFree(routes, rig)
 }

@@ -25,6 +25,7 @@ func orderClaimedPoolHandoffSetup(t *testing.T) (SlingOpts, SlingDeps, beads.Bea
 	}
 	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.StoreRef = "rig:myrig"
 	bead, err := deps.Store.Create(beads.Bead{Title: "hotspot work", Type: "task"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -62,9 +63,8 @@ func TestDoSling_Reassign_ReopensOrderClaimedBead(t *testing.T) {
 	}
 }
 
-// TestDoSling_Reassign_PreservesNonInProgressStatus guards the reopen from
-// over-reaching: --reassign only reopens in_progress beads. A bead in another
-// status (here, blocked) keeps its status; only the assignee is cleared.
+// TestDoSling_Reassign_PreservesNonInProgressStatus checks that blocked work
+// cannot lose its owner through standalone reassignment.
 func TestDoSling_Reassign_PreservesNonInProgressStatus(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{
@@ -73,6 +73,7 @@ func TestDoSling_Reassign_PreservesNonInProgressStatus(t *testing.T) {
 	}
 	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.StoreRef = "rig:myrig"
 	bead, err := deps.Store.Create(beads.Bead{Title: "blocked work", Type: "task"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -82,15 +83,15 @@ func TestDoSling_Reassign_PreservesNonInProgressStatus(t *testing.T) {
 		t.Fatalf("Update to blocked state: %v", err)
 	}
 	opts := SlingOpts{Target: a, BeadOrFormula: bead.ID, NoFormula: true, Reassign: true}
-	if _, err := DoSling(opts, deps, nil); err != nil {
-		t.Fatalf("DoSling --reassign: %v", err)
+	if _, err := DoSling(opts, deps, nil); err == nil {
+		t.Fatal("blocked reassignment unexpectedly succeeded")
 	}
 	got, err := deps.Store.Get(bead.ID)
 	if err != nil {
 		t.Fatalf("store.Get(%s): %v", bead.ID, err)
 	}
-	if got.Assignee != "" {
-		t.Errorf("Assignee = %q, want empty after --reassign", got.Assignee)
+	if got.Assignee != orderActor {
+		t.Errorf("Assignee = %q, want unchanged %q", got.Assignee, orderActor)
 	}
 	if got.Status != "blocked" {
 		t.Errorf("Status = %q, want blocked (reopen must only apply to in_progress beads)", got.Status)

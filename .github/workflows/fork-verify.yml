@@ -3,7 +3,7 @@ name: fork-verify
 # Minimal fork-only CI for gascity forks. Verifies WIP feature branches
 # WITHOUT upstream's Blacksmith
 # self-hosted runners, runner-policy gating, or secrets — none of which a fork
-# has. ubuntu-latest compiles the Dolt go-icu-regex CGO dependency cleanly; the
+# has. Ubuntu (ubicloud-standard-8) compiles the Dolt go-icu-regex CGO dependency cleanly; the
 # `unicode/regex.h` build failure is macOS-only (icu4c@78 header layout), so a
 # Linux runner is exactly what's needed to get a real green/red signal.
 #
@@ -24,10 +24,10 @@ jobs:
     # This lightweight fallback exists only for forks that cannot use those
     # runners or repository secrets.
     if: ${{ github.repository != 'gastownhall/gascity' }}
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-8
     env:
-      DOLT_VERSION: "2.2.0"
-      BD_VERSION: "v1.3.2"
+      DOLT_VERSION: "2.6.0"
+      BD_VERSION: "v1.3.3"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: ./.github/actions/setup-gascity-ubuntu

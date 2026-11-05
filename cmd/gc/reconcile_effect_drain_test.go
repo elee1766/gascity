@@ -210,26 +210,29 @@ func TestIdleBeginProvesIdleInTheEffect(t *testing.T) {
 			w.SleepPolicies[id] = resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityFull}
 		}
 	}
-	for _, c := range []struct {
-		name     string
-		waitErr  error
-		activity time.Duration
-		want     string
-	}{
-		{"not idle", errors.New("busy"), -time.Hour, causeNotIdle},
-		{"active since the pass", nil, time.Second, causeNotIdle},
-		{"proven idle", nil, -time.Hour, ""},
-	} {
-		p, it, _, leaf := admittedBegin(t, idle, full)
-		leaf.WaitForIdleErrors["s-gc-1"] = c.waitErr
-		leaf.Activity = map[string]time.Time{"s-gc-1": gatherNow.Add(c.activity)}
-		s := runBegin(p, it)
-		if s.Cause != c.want || (c.want == "") != (s.Outcome == settledLanded) {
-			t.Errorf("%s: %+v, want cause %q", c.name, s, c.want)
-		}
-		// Not idle is a no-op, never a refusal that backs the row off.
-		if c.want != "" && s.Outcome != settledNoop {
-			t.Errorf("%s: outcome %v, want a no-op (no row backoff)", c.name, s.Outcome)
+	for _, reason := range []string{reasonIdleSleep, ""} {
+		idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reason }
+		for _, c := range []struct {
+			name     string
+			waitErr  error
+			activity time.Duration
+			want     string
+		}{
+			{"not idle", errors.New("busy"), -time.Hour, causeNotIdle},
+			{"active since the pass", nil, time.Second, causeNotIdle},
+			{"proven idle", nil, -time.Hour, ""},
+		} {
+			p, it, _, leaf := admittedBegin(t, idle, full)
+			leaf.WaitForIdleErrors["s-gc-1"] = c.waitErr
+			leaf.Activity = map[string]time.Time{"s-gc-1": gatherNow.Add(c.activity)}
+			s := runBegin(p, it)
+			if s.Cause != c.want || (c.want == "") != (s.Outcome == settledLanded) {
+				t.Errorf("%s: %+v, want cause %q", c.name, s, c.want)
+			}
+			// Not idle is a no-op, never a refusal that backs the row off.
+			if c.want != "" && s.Outcome != settledNoop {
+				t.Errorf("%s: outcome %v, want a no-op (no row backoff)", c.name, s.Outcome)
+			}
 		}
 	}
 	p, it, _, leaf := admittedBegin(t, idle)

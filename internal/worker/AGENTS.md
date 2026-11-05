@@ -6,6 +6,10 @@ through `worker.Handle`, not through `session.Manager`.
 
 ## Active migration: worker boundary
 
+Desired-template memoization must invalidate when a session commits a new launch fingerprint. Fresh launch resolution probes current file content, so a pre-launch cached fingerprint cannot remain authoritative for that new runtime within the same configuration generation.
+
+Owned blocked work keeps a session's seat occupied. Duplicate named-session retirement must refuse linked or blocked work before stopping the runtime or mutating ownership until a durable coordinated handover is available. Automatic no-wake drains must prove an interactive runtime idle at both begin and signal; exclusion of held work from runnable demand is not an idle proof. TimedOnly providers may prove no-wake cleanup safe through a fresh successful idle turn observation plus the activity fence, without becoming eligible for Full-capability interactive idle sleep; unknown or active turns refuse cleanup.
+
 Started `12a0a848` on Apr 17 2026, in progress. New code on affected paths
 must take the canonical route, not the legacy route.
 
@@ -73,8 +77,10 @@ when the context ends. Take the bound from the caller's own context.
   did not get, while the check refuses as unknown (`idleUnknown`), since only
   a busy reading counts as the turn running, and the settle counts it a
   failed read, never the turn's end nor the turn running: a settle whose
-  reads all failed, after family waits that passed or could not answer, is
-  `session.TurnEndUnreadError`, which withholds a restart on failure. That
+  reads all failed, after family waits that passed, could not answer
+  (`runtime.ErrRuntimeUnavailable`) or timed out without one reading that
+  showed the session busy (`runtime.ErrWaitUnobserved`, RUNTIME-CONTRACT-016),
+  is `session.TurnEndUnreadError`, which withholds a restart on failure. That
   includes `ErrObservationOutstanding`, which every later check's own
   reading gets at once while one an earlier check left wedged is still out.
   A read that decides which turn to act on, such as the lane interrupt's
@@ -129,6 +135,17 @@ end between two reads can fall out of it. `CurrentTurn` scans the transcript's
 last 16 MiB (`sessionlog.ScanTurns`) while `WatchTurns` folds what was appended
 since its last rescan (`sessionlog.TurnFollower`), so the two can disagree
 about a turn that began before that window.
+
+For a family whose ends are inferred (Claude), the idle overlay ends a quiet
+open turn after two idle readings, at the observer's clock. A turn the
+transcript shows stopped at a provider error (`sessionlog.TurnScan.Stopped`)
+ends failed on that error instead, at the error's own time: the end the
+transcript records once the next turn starts. So every handle reads the same
+end from the unchanged transcript, and a refusal never reads as newer than it
+is. A failed turn carries the error its transcript recorded
+(`runtime.EndedTurn.Failure`): the source's own class and HTTP status, whether
+the source classed it a rate limit, and the text, for people only. Claude and
+Codex transcripts record it; a family that records none leaves it zero.
 
 ## Keyed deliveries
 
@@ -327,3 +344,11 @@ which waits for CN-1b2.
 The worker reads work beads and other state it does not own through lookups
 injected as func values (for example `FactoryConfig.ResolveBead`), and never
 enumerates stores itself.
+
+## Hook workflow residence
+
+Hook input-ancestry reads and completed-workflow cleanup follow the candidate's proven physical store, not its logical rig or `gc.root_store_ref`; unresolved convoy members still prevent cleanup.
+
+Hook work operations and deferred event readback use the configured provider for the selected physical scope. Bind claim identity per adapter, preserve atomic ownership checks, and never fall back to another provider on a failed open. Lease recovery is optional: an unsupported lease capability must not block ordinary work, but an actual recovery error must remain visible.
+
+Native `gc bd show --json` exposes a CLI-only `revision` for work and graph records. Recovery writes must pass that positive token to `gc bd update --if-revision`; stale tokens fail without retrying against a newer record. Keep recovery policy outside the SDK and preserve existing hold and close gates.

@@ -17,8 +17,7 @@ expressed — as beads composed into formulas — was powerful enough to abstrac
 roles into configuration. Gas City extracts that insight into an SDK where Gas
 Town becomes one configuration among many.
 
-This file holds only what applies everywhere. Rules for a specific area live
-next to that code; read the matching file before changing it.
+Read the area-specific instructions listed below before changing code.
 
 ## Read first
 
@@ -27,9 +26,11 @@ next to that code; read the matching file before changing it.
 | `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
 | `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
+| `internal/sling/` | `internal/sling/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
 | Session creation or lifecycle from `cmd/gc` or `internal/api` | `internal/worker/AGENTS.md` |
+| `gc bd` recovery writes (`--if-revision`) | `internal/worker/AGENTS.md` |
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
 | `scripts/`, test runners, or git hooks | `scripts/AGENTS.md` |
 | Any test | `TESTING.md` |
@@ -143,6 +144,9 @@ Violating any fails the build. Details live in the linked files.
 - **Worker boundary (active migration).** Production `cmd/gc` code reaches
   sessions through `worker.Handle`
   (`TestGCNonTestFilesStayOnWorkerBoundary`; `internal/worker/AGENTS.md`).
+- **Typed store boundary (active migration).** Outside the residency
+  layer, code takes typed class handles, not a raw `beads.Store`, and uses
+  `beads.As` for capabilities (`storeclass` lint, shrink-only baseline).
 - **Agent config field sync.** A new `config.Agent` field is wired in every
   copy and merge site (`TestAgentFieldSync` and siblings;
   `internal/config/AGENTS.md`).

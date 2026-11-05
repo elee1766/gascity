@@ -29,13 +29,19 @@ type QueryTopology struct {
 	//
 	// The zero value is the single-store city every deployment has today, and
 	// the generated command for it is byte-for-byte the one it already runs.
+	//
+	// It is also the switch for reading through the federated reader on a city
+	// that relocates nothing: cmd/gc sets it per agent for the discovery
+	// placeholders a cross-store-eligible agent's prompt renders on a city with
+	// rigs (promptQueryTopology). A topology built that way describes that
+	// agent's prompt, not the city.
 	FederatedReady bool
 }
 
 // includeEphemeralReady reports whether generated ready reads may ask for the
 // wisp/ephemeral tier.
 func (t QueryTopology) includeEphemeralReady() bool {
-	return t.Beads.UsesBD105ReadySemantics()
+	return t.Beads.Provider == "sqlite-work" || t.Beads.UsesBD105ReadySemantics()
 }
 
 // Ready reader commands. bdReadyCommand reads exactly one store — whichever one
@@ -182,11 +188,28 @@ func excludeLabelsJQClause(labels []string) string {
 }
 
 // excludeHoldLabelsJQClause is excludeLabelsJQClause over the
-// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped in_progress
-// probes: they must drop a held bead and nothing else, so they never take the
-// pool-demand serve rules' wider label set.
+// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped probes (the
+// in_progress ones and the bd-1.0.4 assigned-ready wisp probe): they must drop
+// a held bead and nothing else, so they never take the pool-demand serve rules'
+// wider label set.
 func excludeHoldLabelsJQClause() string {
 	return excludeLabelsJQClause(beadmeta.DispatchHoldLabels)
+}
+
+// mailMessageBeadType is the issue_type every mail bead carries
+// (internal/mail/beadmail). Mail is read, never claimed as work (#4419).
+const mailMessageBeadType = "message"
+
+// excludeMailMessagesJQClause returns a jq select(...) clause dropping mail
+// beads, for the jq filters over reads that can return them: the ephemeral
+// `bd query` snapshots, which bd's own ready-path message exclusion never
+// reaches, and the federated in_progress window (servableInProgressRowsScript).
+// The type is trimmed and case-folded the way the
+// hook's hookClaimCandidateIsMessage compares it, so no tier serves a row the
+// hook is certain to refuse; tostring keeps a non-string type from erroring
+// the filter, which its discarded stderr would read as an empty tier.
+func excludeMailMessagesJQClause() string {
+	return ` | select(((.issue_type // .type // "") | tostring | gsub("^\\s+|\\s+$"; "") | ascii_downcase) != "` + mailMessageBeadType + `")`
 }
 
 // heldLabelCountJQ counts how many beadmeta.DispatchHoldLabels values the FIRST
@@ -199,6 +222,11 @@ func excludeHoldLabelsJQClause() string {
 func heldLabelCountJQ() string {
 	return `[ (.[0].labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length`
 }
+
+// openBlockerCountJQ counts the blockers in a blocked_by array that are not
+// closed. Status interpretation is otherwise left to the shared Go filter, so
+// any non-closed status counts.
+const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
 
 // jqMeta renders the jq expression that reads a bead-metadata key with an
 // empty-string default, e.g. (.metadata["gc.routed_to"] // ""). Shell/jq
@@ -256,7 +284,14 @@ func (r PoolDemandServeRules) ShellArgs() string {
 	for _, typ := range r.ExcludeTypes {
 		args += " --exclude-type=" + typ
 	}
-	for _, label := range r.ExcludeLabels {
+	return args + excludeLabelArgs(r.ExcludeLabels)
+}
+
+// excludeLabelArgs renders labels as the repeated --exclude-label flags both
+// readers take.
+func excludeLabelArgs(labels []string) string {
+	var args string
+	for _, label := range labels {
 		args += ` --exclude-label "` + label + `"`
 	}
 	return args
@@ -334,15 +369,20 @@ func ephemeralStatusSnapshotShell(shellVar, status string) string {
 
 // ephemeralReadyBaseSelectorJQ composes the selector clauses shared by every
 // ephemeral ready-tier filter: the caller's own assignee/routing selector,
-// plus the epic exclusion and, when excludeServeLabels is set, the exclusion of
-// every label the routed pool-demand tier refuses
+// plus the epic exclusion, the mail exclusion and, when excludeServeLabels is
+// set, the exclusion of every label the routed pool-demand tier refuses
 // (PoolDemandServeRules.ExcludeLabels). Only the route-scoped tier sets it.
+// Mail is excluded before any tier truncates: a mail bead is ephemeral and
+// assigned to its recipient, so an assigned tier that served it as its only
+// row would exit before the routed tier ran, and the hook refuses it (#4419,
+// #5815). bd's own ready path already omits messages; this jq path is the
+// bd-1.0.4 stand-in for it.
 // Dependency gating is layered on top by each caller, since `bd query --json`
 // exposes only a `dependency_count` scalar — never a `dependencies` array —
 // which is precise enough to prove "definitely no dependencies" but not to
 // resolve whether a nonzero count is still open.
 func ephemeralReadyBaseSelectorJQ(selector string, excludeServeLabels bool) string {
-	body := selector + ` | select(((.issue_type // .type // "") != "epic"))`
+	body := selector + ` | select(((.issue_type // .type // "") != "epic"))` + excludeMailMessagesJQClause()
 	if excludeServeLabels {
 		body += excludeLabelsJQClause(PoolDemandServeRulesForQuery().ExcludeLabels)
 	}
@@ -448,7 +488,7 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 		`r=$(` + routedReadyTierCommand(topo) + `)` + workQueryReadFailure(reader) + `; ` +
 		preferExecutablePoolDemandScript() +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=0", topo) + `)` + workQueryReadFailure(reader) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		legacyEphemeralPoolDemandFromSnapshotShell("legacy_ephemeral_candidates", 20, topo) +
@@ -474,29 +514,24 @@ func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
 func preferExecutablePoolDemandScript() string {
 	predicate := graphWorkflowAnchorJQPredicate()
 	preferJQ := `[.[] | ` + executableWorkflowTopologyJQ() + `]` +
-		` | [.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]`
+		` | ([.[] | select((` + predicate + `) | not)] + [.[] | select(` + predicate + `)]) | .[:20]`
 	return `gc_preferred_pool_demand=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(preferJQ) + ` 2>/dev/null); ` +
 		`[ -n "$gc_preferred_pool_demand" ] && r="$gc_preferred_pool_demand"; `
 }
 
+// RoutedReadyClaimWindow is how many routed ready rows a pool worker's claim
+// tier reads (routedReadyTierCommand). A worker claims only from these rows,
+// so the controller names pool demand bound to a managed worktree only for
+// rows inside this window: a seat placed for a row behind it would be served
+// none of its own work.
+const RoutedReadyClaimWindow = 20
+
 func routedReadyTierCommand(topo QueryTopology) string {
-	// The shared predicate stays order-free so the count-form does no wasted
-	// sorting; the worker first-row path rides the reader's canonical
-	// (priority, created_at, id) default order — both readers default to it
-	// (bd ready's default --sort priority; the federated reader's merged
-	// beads.SortBeadsReadyOrder). An explicit --sort oldest here makes the
-	// claim window priority-blind: a routed P0 behind more than --limit older
-	// lower-priority rows is never served at all, so pool workers
-	// deterministically starve the highest-priority routed work (measured on a
-	// live 14-seat city, 2026-08-25: 13 P0 rows parked behind 34 older wave
-	// rows — the bounded window contained zero P0s until the older rows
-	// drained). FIFO fairness survives within a priority band via the
-	// created_at term. The tier stays widened past a single row (limit=20, not
-	// limit=1) so a self-blocked head (is_blocked / status==blocked) has Ready
-	// routed work behind it to fall through to instead of idle-exiting; the
-	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
-	// the result.
-	return bdReadyPoolDemandShell("--limit=20", topo)
+	// Preserve the reader's canonical (priority, created_at, id) order.
+	// Read all routed rows before filtering: structural workflow latches can
+	// fill an entire reader window and hide executable work from the worker.
+	// preferExecutablePoolDemandScript bounds the eligible candidates to 20.
+	return bdReadyPoolDemandShell("--limit=0", topo)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -593,12 +628,12 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 		identityLoopHead() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
 		assignedInProgressCandidatesTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true) +
+		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor("id", topo) +
@@ -629,24 +664,104 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 //     deferral time. Adoption of an in_progress row performs no status CAS, and
 //     the claim-time metadata stamp already routes through the binding.
 //     on_death/on_boot stay single-store; those remain ga-601v2's slice.
+//
+// The federated read is not one row. `gc ready` merges every store into one
+// ready-ordered answer, so --limit=1 there is one row for the whole city, and
+// the serve gate skips that row when it is blocked or held: a claim the session
+// could resume, in another store or further down the same one, was then never
+// read, and the fresh-claim tiers behind it handed the session another bead —
+// the accumulation this tier exists to stop. A single-store `bd list` answers
+// for one store, and `gc hook` runs it once per store, so there one store's
+// blocked row never costs another store its read. The federated form reads the
+// candidates window instead, with the dispatch holds excluded and the answer
+// ended at its first unblocked row (`gc ready --until-unblocked`), and keeps
+// its first servable row (servableInProgressRowsScript).
+//
+// The cut keeps the window from widening the read's failure. The reader fails a
+// read whose rows' blockers it cannot resolve, so a window read whole failed on
+// a row the tier never serves: a claim behind the session's resumable one,
+// blocked by a bead no store holds, hid the resumable claim and failed the
+// query. With the holds excluded the first unblocked row is the first servable
+// one, so a row past it is never resolved, and one at or ahead of it still
+// fails the query, as the one-row read did.
 func assignedInProgressTierCommand(shellVar string, topo QueryTopology) string {
-	return assignedInProgressTierCommandWithLimit(shellVar, topo, 1)
+	if topo.FederatedReady {
+		return assignedInProgressRead(shellVar, topo, excludeLabelArgs(beadmeta.DispatchHoldLabels)+" --until-unblocked", inProgressCandidatesLimit) +
+			servableInProgressRowsScript(1)
+	}
+	return assignedInProgressRead(shellVar, topo, "", 1)
 }
 
 // assignedInProgressCandidatesTierCommand is the bounded second read used only
 // after the stock one-row recovery tier has identified a graph workflow root.
 // This preserves that tier's byte and fail-open contracts while preventing the
-// root from hiding another in-progress step owned by the same session.
+// root from hiding another in-progress step owned by the same session. The
+// federated form keeps only the window's servable rows, so the first non-anchor
+// row serveOrdinaryInProgressCandidateScript picks is one the gate can serve.
 func assignedInProgressCandidatesTierCommand(shellVar string, topo QueryTopology) string {
-	return assignedInProgressTierCommandWithLimit(shellVar, topo, 20)
+	command := assignedInProgressRead(shellVar, topo, "", inProgressCandidatesLimit)
+	if topo.FederatedReady {
+		command += servableInProgressRowsScript(0)
+	}
+	return command
 }
 
-func assignedInProgressTierCommandWithLimit(shellVar string, topo QueryTopology, limit int) string {
+// inProgressCandidatesLimit bounds the crash-recovery tier's multi-row reads:
+// the candidates read behind a graph anchor, and the federated tier's own read.
+// A servable claim behind more than this many gated ones is not read, and the
+// tier falls through as it does when its window has no servable row.
+const inProgressCandidatesLimit = 20
+
+// servableInProgressRowsScript narrows the federated in_progress read held in
+// $r to the rows the crash-recovery serve gate would serve, in the reader's
+// order, keeping the first limit of them (0 keeps them all).
+//
+// It reads each row the way the gate reads a federated row: the carried
+// blocked_by, where an open blocker skips the row (the reader attaches the field
+// to every row with a blocking edge, so a row without it has none), and the
+// dispatch hold labels. On the tier's own read the reader has already excluded
+// the holds and ended the answer at its first unblocked row, so the row kept is
+// that one; on the candidates read behind a graph anchor every servable row is
+// kept. It runs before the gate, not instead of it: the row it keeps still goes
+// through inProgressBlockedByEnrichmentScript, which falls back to `bd show`
+// for a row that carries no blocked_by.
+//
+// It also drops mail the way the hook refuses it. The read already drops type
+// message (assignedInProgressRead), but its match is exact, so a padded or
+// differently cased spelling reaches this script, which must not serve a row
+// the hook refuses (#5815).
+//
+// It fails open like the gate. Output jq cannot parse leaves $r as the reader
+// printed it, and the gate then serves it unchanged; a window with no servable
+// row becomes "[]", so the tier falls through to the ready tiers, as it did when
+// its one row was blocked.
+func servableInProgressRowsScript(limit int) string {
+	filter := `[.[] | select(((.blocked_by // []) | ` + openBlockerCountJQ + `) == 0)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return `gc_servable_in_progress=$(printf "%s" "$r" | jq -c ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
+		`[ -n "$gc_servable_in_progress" ] && r="$gc_servable_in_progress"; `
+}
+
+// assignedInProgressRead is the crash-recovery tier's in_progress read for one
+// identity, with args after the assignee, bounded to limit rows. The failure
+// clause names the reader alone, whatever args the read carries.
+//
+// The federated read drops mail itself (--exclude-type=message). It lists both
+// storage tiers, so it holds the session's mail wisps, and a --status read
+// applies no infra-type exclusion, unlike bd's ready path and `bd list`. The
+// reader drops the type before its bound and its --until-unblocked cut, which a
+// filter on its answer cannot do: a claimed mail wisp has no blocker and sorts
+// ahead of a newer claim, so the cut would end the answer at the mail and the
+// claim behind it would never be read (#5815).
+func assignedInProgressRead(shellVar string, topo QueryTopology, args string, limit int) string {
 	reader := bdListInProgressCommand
 	if topo.FederatedReady {
 		reader = gcReadyCommand + ` --status in_progress`
+		args = ` --exclude-type=` + mailMessageBeadType + args
 	}
-	return `r=$(` + reader + ` --assignee="$` + shellVar + `" --json --limit=` + strconv.Itoa(limit) + `)` +
+	return `r=$(` + reader + ` --assignee="$` + shellVar + `"` + args + ` --json --limit=` + strconv.Itoa(limit) + `)` +
 		workQueryReadFailure(reader) + `; `
 }
 
@@ -655,7 +770,7 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 	return identityLoopHead() +
 		assignedInProgressTierCommand("id", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true) +
+		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("id", topo) +
 		`done; `
@@ -694,14 +809,12 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // ready queue. The hold dimension is the same defect class as the dependency
 // dimension above, so it shares the same fall-through.
 //
-// Scope (ga-5736js): the hold check is the WORK-SERVING decision only. The
-// assignee-scoped probes that answer "does a session still need to exist" —
-// ephemeralAssignedReadyProbeScript here and filterReadyByAssignee in
-// cmd/gc/dispatch_control_ready.go — stay hold-transparent by design so a held
-// assignment still keeps its owner visible to demand and recovery accounting.
-// Those callers pass checkHold=false, which omits every `.labels` reference
-// from the generated script — TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels
-// pins the omission, not just the outcome.
+// Scope (ga-5736js): the hold check is the WORK-SERVING decision only, and it
+// reads the candidate row after the tier's read has cut it to one. The wisp
+// probes (ephemeralAssignedInProgressProbeScript and
+// ephemeralAssignedReadyProbeScript) drop held rows inside their own jq
+// selection, ahead of their `.[:1]` cut, so they pass checkHold=false: the
+// count here would always read zero for them.
 //
 // Enrichment is fail-open: a failed or unparseable `bd show`, or an
 // unparseable `bd list` row, degrades to the stock behavior of serving the
@@ -725,22 +838,23 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // never fire there — it would be pure added shell on the path every existing
 // deployment runs, for zero behavior change. Same zero-risk scoping the ready
 // tiers used for their own swap.
-func inProgressBlockedByEnrichmentScript(federated bool, checkHold bool) string {
+func inProgressBlockedByEnrichmentScript(federated bool, checkHold bool, native bool) string {
 	return inProgressBlockedByEnrichmentScriptWithServeAction(
 		federated,
 		checkHold,
 		`printf "%s" "$r" && exit 0; `,
+		native,
 	)
 }
 
-func inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(federated bool, checkHold bool) string {
+func inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(federated bool, checkHold bool, native bool) string {
 	graphAnchorJQ := `.[0] | select(` + graphWorkflowAnchorJQPredicate() + `) | .id // empty`
 	serveAction := `graph_anchor_id=$(printf "%s" "$r" | jq -r ` +
 		shellquote.Quote(graphAnchorJQ) + ` 2>/dev/null); ` +
 		`if [ -n "$graph_anchor_id" ]; then ` +
 		`[ -n "$gc_assigned_workflow_anchor_json" ] || gc_assigned_workflow_anchor_json="$r"; ` +
 		`else printf "%s" "$r" && exit 0; fi; `
-	return inProgressBlockedByEnrichmentScriptWithServeAction(federated, checkHold, serveAction)
+	return inProgressBlockedByEnrichmentScriptWithServeAction(federated, checkHold, serveAction, native)
 }
 
 func graphWorkflowAnchorJQPredicate() string {
@@ -750,24 +864,23 @@ func graphWorkflowAnchorJQPredicate() string {
 
 // serveOrdinaryInProgressCandidateScript selects the first non-anchor row from
 // the bounded second read, then applies the unchanged crash-recovery gates.
-func serveOrdinaryInProgressCandidateScript(federated bool, checkHold bool) string {
+func serveOrdinaryInProgressCandidateScript(federated bool, checkHold bool, native bool) string {
 	predicate := graphWorkflowAnchorJQPredicate()
 	nonAnchorJQ := `[.[] | select((` + predicate + `) | not)] | .[:1]`
 	return `gc_assigned_in_progress_candidates_json="$r"; ` +
 		`r=$(printf "%s" "$gc_assigned_in_progress_candidates_json" | jq -c ` + shellquote.Quote(nonAnchorJQ) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript(federated, checkHold) +
+		inProgressBlockedByEnrichmentScript(federated, checkHold, native) +
 		`fi; `
 }
 
-func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHold bool, serveAction string) string {
+func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHold bool, serveAction string, native bool) string {
 	// The tier stores its candidate row in $r and its enriched copy in
 	// $r_enriched; both callers use those names.
 	const shellVar = "r"
 	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
 		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
 		`.dependency_type == "conditional-blocks") | {id, status}]`
-	const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
 
 	const enrichJQ = `map(. + {blocked_by: $bb})`
 	const carriedBlockedByJQ = `.[0].blocked_by // empty`
@@ -790,6 +903,14 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 		fallback += `fi; `
 	}
 
+	initial := `bb="[]"; `
+	if native {
+		// Native ready rows include blocker state, with an omitted field meaning no blockers.
+		carried = `bb=$(printf "%s" "` + v + `" | jq -c '.[0].blocked_by // []' 2>/dev/null); `
+		initial = ""
+		fallback = ""
+	}
+
 	holdCheck := ""
 	holdCond := ""
 	if checkHold {
@@ -800,7 +921,7 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 
 	return `bid=$(printf "%s" "` + v + `" | jq -r ".[0].id // empty" 2>/dev/null); ` +
 		carried +
-		`bb="[]"; ` +
+		initial +
 		fallback +
 		`[ -z "$bb" ] && bb="[]"; ` +
 		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
@@ -817,10 +938,19 @@ func inProgressBlockedByEnrichmentScriptWithServeAction(federated bool, checkHol
 // assignedReadyTierCommand is the assigned-ready read for one identity: the
 // pre-assigned tier, and the tier a graph step assigned to this worker arrives
 // on. It is one of the four ready reads the federation swap covers.
+//
+// The read excludes beadmeta.DispatchHoldLabels (never the human label) before
+// its --limit=1. Its callers serve the first row and exit the query, so a held
+// row it returned would be stripped by the hook's held-candidate filter and
+// starve every tier below (#8010); filtering ahead of the limit also keeps a
+// held head from hiding an unheld assignment for the same identity. On bd-1.0.4
+// the wisp probe behind it (ephemeralAssignedReadyProbeScript) filters the same
+// way.
 func assignedReadyTierCommand(shellVar string, topo QueryTopology) string {
 	reader := readyReaderCommand(topo.FederatedReady)
 	return `r=$(` + reader + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) +
-		` --assignee="$` + shellVar + `" --json --limit=1)` +
+		` --assignee="$` + shellVar + `"` + excludeLabelArgs(beadmeta.DispatchHoldLabels) +
+		` --json --limit=1)` +
 		workQueryReadFailure(reader) + `; `
 }
 
@@ -845,12 +975,12 @@ func legacyControlAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo Que
 		`[ -z "$cand" ] && continue; ` +
 		assignedInProgressTierCommand("cand", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true) +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
 		assignedInProgressCandidatesTierCommand("cand", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true) +
+		serveOrdinaryInProgressCandidateScript(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor("cand", topo) +
@@ -865,7 +995,7 @@ func legacyControlAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 		`[ -z "$cand" ] && continue; ` +
 		assignedInProgressTierCommand("cand", topo) +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true) +
+		inProgressBlockedByEnrichmentScript(topo.FederatedReady, true, topo.Beads.Provider == "sqlite-work") +
 		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("cand", topo) +
 		`done; ` +
@@ -899,40 +1029,46 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // this probe's jq consumes the `bd query` snapshot, never raw stdout, so it
 // never serves an unparseable row. An unparseable or failed scan does not fall
 // through as an empty tier either: the snapshot read itself fails the query
-// (ephemeralStatusSnapshotShell). The hold-transparent existence
-// probes (ephemeralAssignedReadyProbeScript) are out of scope per ga-5736js.
+// (ephemeralStatusSnapshotShell). The open tier's wisp probe,
+// ephemeralAssignedReadyProbeScript, drops held rows the same way (#8010).
 //
 // It must also apply the same inProgressBlockedByEnrichmentScript gate before
 // serving a surviving candidate, or a blocked in_progress wisp step is
 // re-served on every hook tick (ga-qjozkw).
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
-	_ = topo
-	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `] | .[:1]`
+	if topo.Beads.Provider == "sqlite-work" {
+		return ""
+	}
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `] | .[:1]`
 	// federated=false: this row comes from `bd query`, which never carries a
 	// resolved blocked_by, so the carried-lookup branch would only ever fall
 	// through to bd show — skip straight to it. checkHold=false: the filter
 	// above already excludes held candidates before the `.[:1]` truncation, so
-	// the post-truncation nheld check here would always read zero.
+	// the post-truncation nheld check here would always read zero. Mail is
+	// dropped there too: a claimed mail wisp is never work, so it must not hold
+	// the crash-recovery slot (#5815).
 	return ephemeralStatusSnapshotShell("in_progress_ephemeral", "in_progress") +
 		`r=$(printf "%s" "$in_progress_ephemeral" | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScript(false, false) +
+		inProgressBlockedByEnrichmentScript(false, false, false) +
 		`fi; `
 }
 
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
-	_ = topo
-	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `]`
+	if topo.Beads.Provider == "sqlite-work" {
+		return ""
+	}
+	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
 	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, false) +
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, false, false) +
 		`fi; ` +
 		`if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:20]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
-		serveOrdinaryInProgressCandidateScript(false, false) +
+		serveOrdinaryInProgressCandidateScript(false, false, false) +
 		`fi; ` +
 		`fi; `
 }
@@ -945,19 +1081,25 @@ func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string,
 // front door put the wisp somewhere a plain read cannot see it, which is the
 // single-store city.
 //
+// It is the wisp half of the assigned-ready tier: like assignedReadyTierCommand
+// ahead of it, it serves its first row and exits the query. So it drops
+// beadmeta.DispatchHoldLabels (never the human label) inside its jq selection,
+// before the `.[:1]` cut. A held wisp it served would be stripped by the hook's
+// held-candidate filter and starve every tier below it (#8010), and filtering
+// ahead of the cut keeps a held wisp from hiding an unheld one assigned to the
+// same identity.
+//
 // It tries the fast dependency_count == 0 candidate first, then falls back to
 // a dependency_count > 0 candidate enriched via a real bd show --json call,
 // so a step whose dependencies have since all closed is still reachable —
-// see ephemeralReadyDependencyCandidateFilterJQ. The enrichment call passes
-// checkHold=false: this is an assignee-scoped existence probe, not the
-// in_progress work-serving gate, so it must stay hold-transparent (ga-5736js;
-// pinned by TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels).
+// see ephemeralReadyDependencyCandidateFilterJQ.
 func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) string {
 	if topo.includeEphemeralReady() {
 		return ""
 	}
-	fastFilter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1, false)
-	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(`select((.assignee // "") == $id)`, 1, false)
+	selector := `select((.assignee // "") == $id)` + excludeHoldLabelsJQClause()
+	fastFilter := legacyEphemeralReadyFilterJQ(selector, 1, false)
+	slowFilter := ephemeralReadyDependencyCandidateFilterJQ(selector, 1, false)
 	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
 		`r=$(printf "%s" "$open_ephemeral" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(fastFilter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
@@ -965,9 +1107,10 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
 		// federated=false: this row comes from `bd query`, which never
 		// carries a resolved blocked_by, so skip straight to the bd show
-		// fallback. checkHold=false: ga-5736js, this probe must stay
-		// hold-transparent.
-		inProgressBlockedByEnrichmentScript(false, false) +
+		// fallback. checkHold=false: the selector above already excludes
+		// held candidates before the `.[:1]` truncation, so the
+		// post-truncation nheld check here would always read zero.
+		inProgressBlockedByEnrichmentScript(false, false, false) +
 		`fi; `
 }
 
@@ -1073,11 +1216,9 @@ type querySpec struct {
 	// override returns the user-supplied command that replaces the
 	// default entirely, or "" when the default applies.
 	override func(*Agent) string
-	// build returns the default command for a city topology. The onDeath/onBoot
-	// builders ignore BOTH of the topology's fields today and MUST keep ignoring
-	// them: the ephemeral flag by S04b invariant I6, and FederatedReady because
-	// they are WRITE hooks (`bd list` + `bd update`), which the federated READER
-	// has no form of — routing those is ga-601v2.
+	// build returns the default command for a city topology. Native SQLite
+	// recovery uses federated reads and guarded gc writes across both tiers.
+	// Legacy recovery retains its provider's bd commands.
 	build func(a *Agent, topo QueryTopology) string
 }
 
@@ -1100,6 +1241,9 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 	spec := queryTable[kind]
 	if o := spec.override(a); o != "" {
 		return o
+	}
+	if topo.Beads.Provider == "sqlite-work" {
+		topo.FederatedReady = true
 	}
 	return spec.build(a, topo)
 }
@@ -1132,6 +1276,17 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 // output). Roles that need different behavior still opt in via an explicit
 // work_query in their agent config; that custom query is returned unchanged
 // above.
+//
+// The assigned-ready tier skips dispatch-held rows (never the human label),
+// in its ready read and in its bd-1.0.4 wisp probe alike, so a held assignment
+// is neither served nor able to mask other work.
+//
+// Mail (issue_type=message) is withheld from every tier: it is read, never
+// claimed (#4419). bd's ready path and `bd list` omit it natively, the
+// federated in_progress read passes --exclude-type=message, and the
+// jq-filtered tiers drop it before they truncate, so a recipient's mail wisp
+// cannot stand in for that tier's only row and end the query before the
+// routed tier runs (#5815).
 //
 // When the reconciler runs the query for demand detection (no session
 // context), all identity vars are empty → assignee tiers skip → only
@@ -1193,10 +1348,9 @@ func (a *Agent) EffectiveAssignedInProgressQuery() string {
 }
 
 // EffectiveAssignedInProgressQueryFor returns the assigned-in-progress query
-// built for a city topology. It is topology-BLIND today: the crash-recovery tier
-// reads `bd list`, not the ready set — see
-// standardAssignedInProgressWorkQueryScript for why federating it is ga-601v2's
-// slice and not this one's.
+// built for a city topology. On a federated topology its crash-recovery read is
+// `gc ready --status in_progress` rather than single-store `bd list` — see
+// assignedInProgressTierCommand.
 func (a *Agent) EffectiveAssignedInProgressQueryFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryAssignedInProgress, topo)
 }
@@ -1382,13 +1536,15 @@ func (a *Agent) EffectiveOnDeath() string {
 }
 
 // EffectiveOnDeathFor returns the default on_death command for a city topology.
-// It is topology-blind: on_death is a write hook, and the federated reader has
-// no write form (ga-601v2).
+// Native work providers use guarded gc writes rather than a bd subprocess.
 func (a *Agent) EffectiveOnDeathFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnDeath, topo)
 }
 
 func buildOnDeath(a *Agent, topo QueryTopology) string {
+	if topo.Beads.Provider == "sqlite-work" {
+		return buildSQLiteWorkOnDeath(a)
+	}
 	route := a.QualifiedName()
 	if a.PoolName != "" {
 		route = a.PoolName
@@ -1425,13 +1581,15 @@ func (a *Agent) EffectiveOnBoot() string {
 }
 
 // EffectiveOnBootFor returns the default on_boot command for a city topology.
-// It is topology-blind: on_boot is a write hook, and the federated reader has no
-// write form (ga-601v2).
+// Native work providers use guarded gc writes rather than a bd subprocess.
 func (a *Agent) EffectiveOnBootFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnBoot, topo)
 }
 
 func buildOnBoot(a *Agent, topo QueryTopology) string {
+	if topo.Beads.Provider == "sqlite-work" {
+		return buildSQLiteWorkOnBoot(a)
+	}
 	template := a.QualifiedName()
 	if a.PoolName != "" {
 		template = a.PoolName
@@ -1448,4 +1606,30 @@ func buildOnBoot(a *Agent, topo QueryTopology) string {
 		ephemeralRead +
 		`} | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} sh -c 'if ! err=$(bd update "$1" --status open 2>&1 >/dev/null); then printf "gc-recovery: on_boot reopen failed for %s: %s\n" "$1" "$err"; fi' _ {}`
+}
+
+func buildSQLiteWorkOnDeath(a *Agent) string {
+	owner := shellquote.Quote(a.QualifiedName())
+	route := a.QualifiedName()
+	if a.PoolName != "" {
+		route = a.PoolName
+	}
+	return `gc ready --status in_progress --assignee ` + owner + ` --json | ` +
+		`jq -r '.[] | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' | ` +
+		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
+		`[ -z "$id" ] && continue; ` +
+		`if [ -n "$run_target" ] || [ -n "$routed_to" ]; then ` +
+		`if ! err=$(gc bd update "$id" --if-assignee ` + owner + ` --if-status in_progress --assignee "" --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; ` +
+		`else if ! err=$(gc bd update "$id" --if-assignee ` + owner + ` --if-status in_progress --assignee "" --status open --set-metadata ` + shellquote.Quote(beadmeta.RunTargetMetadataKey+"="+route) + ` 2>&1 >/dev/null); then printf 'gc-recovery: on_death release failed for %s: %s\n' "$id" "$err"; fi; fi; done`
+}
+
+func buildSQLiteWorkOnBoot(a *Agent) string {
+	template := a.QualifiedName()
+	if a.PoolName != "" {
+		template = a.PoolName
+	}
+	return `gc ready --status in_progress --unassigned --json | ` +
+		`jq -r --arg template ` + shellquote.Quote(template) + ` '.[] | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' | ` +
+		`while IFS= read -r id; do [ -z "$id" ] && continue; ` +
+		`if ! err=$(gc bd update "$id" --if-assignee "" --if-status in_progress --status open 2>&1 >/dev/null); then printf 'gc-recovery: on_boot reopen failed for %s: %s\n' "$id" "$err"; fi; done`
 }

@@ -3,8 +3,8 @@ package main
 // bead.* announcement for the writes `gc hook --claim` makes to a work store.
 //
 // The hook claims a step from a one-shot worker process by writing the agent's
-// work store directly (a bd subprocess, hookClaimBdStoreContext). Nothing in
-// that path records a bead.* event, and the supervisor's run views
+// configured work store directly. Nothing in that path records a bead.* event,
+// and the supervisor's run views
 // (GET /runs, /runs/{id}, /runs/{id}/steps) are a fold of exactly those events
 // in <city>/.gc/events.jsonl. So a claimed step stayed pending with no assignee
 // in the run views until the supervisor happened to read the row back: a live
@@ -62,6 +62,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"strings"
 	"sync"
@@ -93,7 +94,7 @@ func withHookClaimBeadEvents(ops hookClaimOps, cityPath string) hookClaimOps {
 	}
 	ops.applyDefaults()
 	base := ops
-	a := &hookClaimAnnouncer{cityPath: cityPath}
+	a := &hookClaimAnnouncer{cityPath: cityPath, open: ops.OpenStore}
 	setAssignee := func(assignee string) func(*beads.Bead) *beads.Bead {
 		return func(prev *beads.Bead) *beads.Bead {
 			if prev == nil {
@@ -184,6 +185,7 @@ func (ops *hookClaimOps) announceBeadEvents() {
 // bead per store, until they are announced.
 type hookClaimAnnouncer struct {
 	cityPath string
+	open     hookClaimStoreOpener
 
 	mu      sync.Mutex
 	pending []*hookClaimNote
@@ -249,8 +251,8 @@ func (a *hookClaimAnnouncer) note(dir string, env []string, beadID string, deriv
 }
 
 // announce records a bead.updated for every noted bead, store by store, and
-// forgets the notes. A row that has to be read back is read through the bd
-// context of the store the write went to.
+// forgets the notes. A row that has to be read back is read through the same
+// configured opener as the write.
 func (a *hookClaimAnnouncer) announce() {
 	a.mu.Lock()
 	pending := a.pending
@@ -271,16 +273,24 @@ func (a *hookClaimAnnouncer) announce() {
 		byStore[key] = append(byStore[key], n)
 	}
 	for _, key := range order {
-		notes := byStore[key]
-		store := hookClaimBdStoreContext(ctx, notes[0].dir, notes[0].env, "")
-		emitter := &emittingClassStore{Store: store, cityPath: a.cityPath}
-		rows := announcedRows(emitter, notes)
-		emissions := make([]classStoreEmission, 0, len(rows))
-		for _, bead := range rows {
-			emissions = append(emissions, classStoreEmission{eventType: events.BeadUpdated, bead: bead})
-		}
-		emitter.emit(emissions...)
+		a.announceStore(ctx, byStore[key])
 	}
+}
+
+func (a *hookClaimAnnouncer) announceStore(ctx context.Context, notes []*hookClaimNote) {
+	store, err := a.open(ctx, notes[0].dir, notes[0].env, "")
+	if err != nil {
+		warnClassStoreEmit(fmt.Errorf("opening hook announcement store at %s: %w", notes[0].dir, err))
+		return
+	}
+	defer closeHookClaimStore(store)
+	emitter := &emittingClassStore{Store: store, cityPath: a.cityPath}
+	rows := announcedRows(emitter, notes)
+	emissions := make([]classStoreEmission, 0, len(rows))
+	for _, bead := range rows {
+		emissions = append(emissions, classStoreEmission{eventType: events.BeadUpdated, bead: bead})
+	}
+	emitter.emit(emissions...)
 }
 
 // announcedRows returns the post-write rows of notes, in order: derived rows as

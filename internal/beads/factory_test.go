@@ -19,6 +19,87 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+func TestOpenStoreAtForCitySQLiteWork(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "1")
+	dir := t.TempDir()
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:         dir,
+		Provider:          " sqlite-work ",
+		NativeTransport:   NativeTransportOff,
+		ConditionalWrites: gate.Require,
+		OpenSQLiteWorkStore: func() (Store, error) {
+			return OpenSQLiteWorkStore(dir, WithSQLiteStoreIDPrefix("wrk"), WithSQLiteStoreRetention(0, 0))
+		},
+		OpenBdStore: func() (Store, error) {
+			t.Fatal("sqlite-work opened bd fallback")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := WithClaimActor(result.Store, "runner")
+	t.Cleanup(func() { _ = store.(interface{ CloseStore() error }).CloseStore() })
+	if result.Diagnostic.Store != BeadsStoreNameSQLiteWorkStore || !result.Diagnostic.NativeStoreEligible {
+		t.Fatalf("sqlite-work diagnostic = %+v", result.Diagnostic)
+	}
+	b, err := store.Create(Bead{Title: "claim through configured factory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := WithClaimActor(result.Store, "other")
+	otherBead, err := other.Create(Bead{Title: "independent actor on the same backend"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed, won, err := other.(AssignmentClaimer).Claim(otherBead.ID); err != nil || !won || claimed.Assignee != "other" {
+		t.Fatalf("second actor claim = %+v, %v, %v", claimed, won, err)
+	}
+	claimed, won, err := store.(AssignmentClaimer).Claim(b.ID)
+	if err != nil || !won || claimed.Assignee != "runner" || claimed.Metadata[WorkLeaseExpiresMetadataKey] == "" {
+		t.Fatalf("configured claim = %+v, %v, %v", claimed, won, err)
+	}
+	if _, _, err := store.(StaleAssignmentReclaimer).ReclaimStale(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if moved, err := store.(ConditionalAssigneeTransferer).TransferIfCurrent(b.ID, "runner", "next"); err != nil || !moved {
+		t.Fatalf("configured transfer = %v, %v", moved, err)
+	}
+	if released, err := store.(ConditionalAssignmentReleaser).ReleaseIfCurrent(b.ID, "next"); err != nil || !released {
+		t.Fatalf("configured release = %v, %v", released, err)
+	}
+	if err := store.(interface{ CloseStore() error }).CloseStore(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := result.Store.Get(b.ID); !errors.Is(err, ErrStoreClosed) {
+		t.Fatalf("bound handle did not close backend: %v", err)
+	}
+}
+
+func TestOpenStoreAtForCitySQLiteWorkNeverFallsBack(t *testing.T) {
+	want := errors.New("scope identity guard refused")
+	for _, tc := range []struct {
+		opener func() (Store, error)
+		want   error
+	}{
+		{nil, nil},
+		{func() (Store, error) { return nil, nil }, nil},
+		{func() (Store, error) { return nil, want }, want},
+	} {
+		_, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+			Provider:            "sqlite-work",
+			OpenSQLiteWorkStore: tc.opener,
+			OpenBdStore: func() (Store, error) {
+				t.Fatal("unavailable sqlite-work opened bd fallback")
+				return nil, nil
+			},
+		})
+		if err == nil || (tc.want != nil && !errors.Is(err, tc.want)) {
+			t.Fatalf("unavailable sqlite-work error = %v", err)
+		}
+	}
+}
+
 // TestLogNativeUnavailableDowngradesBDContextAgreementToDebug pins the noise
 // fix: the bd_context_agreement gate (a benign degrade-not-block check that
 // fires on every non-git city root) logs at Debug so it is silent at the
@@ -1505,5 +1586,38 @@ func TestOpenStoreAtForCityProxiedFlagOnLeavesNonProxiedScopesAlone(t *testing.T
 				t.Fatalf("flag-on diagnostic =\n  %s\nflag-off =\n  %s\nthe flag changed what a non-proxied scope reports", onJSON, offJSON)
 			}
 		})
+	}
+}
+
+// TestOpenStoreAtForCityForceProxiedNativeTakesTheLaneForThatOpenAlone: the
+// storage migration's maintenance window turns the proxied-native lane on for
+// its own opens, with the process flag off, and only for those opens.
+func TestOpenStoreAtForCityForceProxiedNativeTakesTheLaneForThatOpenAlone(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	t.Setenv(proxiedNativeEnv, "")
+	scope := proxiedScopeFixture(t)
+	proxied, fallback := NewMemStore(), NewMemStore()
+	open := func(force bool) StoreOpenResult {
+		t.Helper()
+		result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+			ScopeRoot:          scope,
+			Provider:           "bd",
+			PreflightChecker:   refusingPreflightChecker(t),
+			ForceProxiedNative: force,
+			OpenBdStore:        func() (Store, error) { return fallback, nil },
+			OpenProxiedStore: func(context.Context, bool) (Store, ProxiedOpenReport, error) {
+				return proxied, proxiedOpenReportFixture(), nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("OpenStoreAtForCity(force=%v): %v", force, err)
+		}
+		return result
+	}
+	if got := open(true); got.Store != Store(proxied) || got.Diagnostic.Store != BeadsStoreNameNativeDoltStore {
+		t.Fatalf("forced open = %T (%s), want the proxied store on the native lane", got.Store, got.Diagnostic.Store)
+	}
+	if got := open(false); got.Store != Store(fallback) {
+		t.Fatalf("unforced open with the flag off = %T, want the bd fallback", got.Store)
 	}
 }

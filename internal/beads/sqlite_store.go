@@ -60,6 +60,7 @@ type SQLiteStoreOptions struct {
 	disableRetentionSweeper bool
 	readOnly                bool
 	privateRecovery         bool
+	dependencyResolver      func(context.Context, string) (Bead, error)
 }
 
 var (
@@ -92,6 +93,11 @@ var (
 
 // SQLiteStoreOption customizes OpenSQLiteStore.
 type SQLiteStoreOption func(*SQLiteStoreOptions)
+
+// WithSQLiteDependencyResolver resolves dependency targets absent from this ledger.
+func WithSQLiteDependencyResolver(resolve func(context.Context, string) (Bead, error)) SQLiteStoreOption {
+	return func(o *SQLiteStoreOptions) { o.dependencyResolver = resolve }
+}
 
 // WithSQLiteStoreIDPrefix sets the generated bead ID prefix.
 func WithSQLiteStoreIDPrefix(prefix string) SQLiteStoreOption {
@@ -246,6 +252,7 @@ type SQLiteStore struct {
 	legacyDepsPrimaryKey       bool
 	sequenceFloorPath          string
 	localStrings               *localSidecar // clone-local data; see Store.SetLocalString
+	dependencyResolver         func(context.Context, string) (Bead, error)
 }
 
 // OpenSQLiteStore opens or creates a pure-Go SQLite bead store under dir.
@@ -337,6 +344,7 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 		readOnly:                cfg.readOnly,
 		sequenceFloorPath:       filepath.Join(dir, sqliteSequenceFloorFilenameFor(cfg.prefix)),
 		localStrings:            newLocalSidecar(filepath.Join(dir, ".beads", "local-strings.json")),
+		dependencyResolver:      cfg.dependencyResolver,
 	}
 
 	// Schema application is creation-only. Existing databases were admitted
@@ -1578,6 +1586,10 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 		where = append(where, "COALESCE(NULLIF(b.updated_at, 0), b.created_at) < ?")
 		args = append(args, q.UpdatedBefore.UnixNano())
 	}
+	if !q.UpdatedSince.IsZero() {
+		where = append(where, "COALESCE(NULLIF(b.updated_at, 0), b.created_at) >= ?")
+		args = append(args, q.UpdatedSince.UnixNano())
+	}
 	if q.Label != "" {
 		where = append(where, "EXISTS (SELECT 1 FROM labels l WHERE l.bead_id=b.id AND l.label=?)")
 		args = append(args, q.Label)
@@ -1671,6 +1683,9 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 	}
 
 	sqlText, args := sqliteReadySQL(q, s.sqliteBeadProjection())
+	if s.dependencyResolver != nil {
+		sqlText = strings.Replace(sqlText, sqliteReadyBlockerExists("b.id"), sqliteLocalReadyBlockerExists("b.id"), 1)
+	}
 	rows, err := s.readDB.QueryContext(ctx, sqlText, args...)
 	if err != nil {
 		// A canceled read surfaces as the driver's "interrupted" error on some
@@ -1708,6 +1723,13 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 	if err := contextErr(); err != nil {
 		return nil, err
 	}
+	if s.dependencyResolver != nil {
+		blocked := make(map[string]bool, len(result))
+		if err := s.readExternalBlockers(ctx, beadIDsFromSlice(result), blocked); err != nil {
+			return nil, err
+		}
+		result = slices.DeleteFunc(result, func(b Bead) bool { return blocked[b.ID] })
+	}
 	// Cut the Limit prefix only after the canonical sort, so a bounded read
 	// takes the same rows a cache-served read over this store takes (#3208).
 	if err := sortBeadsReadyOrderContext(ctx, result); err != nil {
@@ -1724,11 +1746,19 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 // excluded labels) and then sorts into the canonical ready order, so a
 // source-side LIMIT would cut the wrong prefix.
 func sqliteReadySQL(q ReadyQuery, projection string) (string, []any) {
+	return sqliteReadyCandidateSQL(q, projection, "NOT "+sqliteReadyBlockerExists("b.id"))
+}
+
+// sqliteReadyCandidateSQL is sqliteReadySQL with the blocking clause supplied:
+// Ready negates sqliteReadyBlockerExists, and ReadyBlockedByAbsent selects the
+// rows an absent target blocks (sqliteAbsentBlockerExists). Every other filter
+// is the same, so the two cannot disagree about what a ready candidate is.
+func sqliteReadyCandidateSQL(q ReadyQuery, projection, blocking string) (string, []any) {
 	args := []any{}
 	where := []string{
 		"b.status='open'",
 		`b.issue_type NOT IN ('merge-request','gate','molecule','step','message','session','agent','role','rig')`,
-		"NOT " + sqliteReadyBlockerExists("b.id"),
+		blocking,
 	}
 	switch q.TierMode {
 	case TierWisps:
@@ -1785,6 +1815,10 @@ func sqliteReadyBlockerExists(issueCol string) string {
 			       )
 			  )
 		  )`, issueCol, beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkOutcomeBlocked, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass, beadmeta.StepRefMetadataKey)
+}
+
+func sqliteLocalReadyBlockerExists(issueCol string) string {
+	return strings.Replace(sqliteReadyBlockerExists(issueCol), "COALESCE(blocker.status, '') <> 'closed'", "(blocker.id IS NOT NULL AND blocker.status <> 'closed')", 1)
 }
 
 // Children returns all non-closed beads whose ParentID matches the given ID.

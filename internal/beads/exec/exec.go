@@ -35,6 +35,9 @@ type Store struct {
 	// restart, which is an accepted limitation for this delegating store.
 	localMu      sync.Mutex
 	localStrings map[string]map[string]string
+
+	// payloadBlind is DeclarePayloadBlind's grant.
+	payloadBlind bool
 }
 
 // SetEnv sets environment variables passed to the script process.
@@ -389,10 +392,10 @@ func (s *Store) List(query beads.ListQuery) ([]beads.Bead, error) {
 		if query.Type != "" {
 			args = append(args, "--type="+query.Type)
 		}
-		// SeekAfter (like CreatedBefore) is applied Go-side after the script
-		// returns, so a script-side limit would cut rows before the boundary
-		// filter runs and silently skip page rows.
-		if query.Limit > 0 && query.CreatedBefore.IsZero() && query.SeekAfter == nil {
+		// SeekAfter (like CreatedBefore and the updated-time filters) is applied
+		// Go-side after the script returns, so a script-side limit would cut rows
+		// before the boundary filter runs and silently skip page rows.
+		if query.Limit > 0 && query.CreatedBefore.IsZero() && query.UpdatedBefore.IsZero() && query.UpdatedSince.IsZero() && query.SeekAfter == nil {
 			args = append(args, "--limit="+strconv.Itoa(query.Limit))
 		}
 		out, err = s.run(nil, args...)
@@ -604,5 +607,28 @@ func (s *Store) DepList(id, direction string) ([]beads.Dep, error) {
 	return deps, nil
 }
 
-// Compile-time interface check.
-var _ beads.Store = (*Store)(nil)
+// DeclarePayloadBlind records that this store's provider keeps no dependency
+// payload anywhere it could be read from: the exec protocol has no payload
+// field (a create request carries none and dep-add takes three arguments), and
+// the provider is not backed by bd, where a graph plan can have written one.
+// Whether the provider is bd-backed is the caller's knowledge, not the
+// protocol's, so the store declares nothing until the caller that built it
+// grants it (cmd/gc's exec store opener).
+func (s *Store) DeclarePayloadBlind() {
+	s.payloadBlind = true
+}
+
+// DepMetadataAbsentByProtocol reports the declaration DeclarePayloadBlind
+// granted.
+func (s *Store) DepMetadataAbsentByProtocol() (string, bool) {
+	if s == nil || !s.payloadBlind {
+		return "", false
+	}
+	return "exec", true
+}
+
+// Compile-time interface checks.
+var (
+	_ beads.Store                       = (*Store)(nil)
+	_ beads.DepMetadataAbsentByProtocol = (*Store)(nil)
+)

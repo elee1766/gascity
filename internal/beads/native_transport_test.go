@@ -271,6 +271,7 @@ func TestProviderConsultsNativeTransport(t *testing.T) {
 		{name: "bd-contract exec by name", provider: "exec:gc-beads-bd", want: true},
 		{name: "bd-contract exec by path", provider: "exec:/city/.gc/scripts/gc-beads-bd.sh", want: true},
 		{name: "file", provider: "file", want: false},
+		{name: "sqlite work", provider: "sqlite-work", want: false},
 		{name: "file with surrounding space", provider: " file ", want: false},
 		{name: "exec outside the bd contract", provider: "exec:noop.sh", want: false},
 	}
@@ -281,12 +282,13 @@ func TestProviderConsultsNativeTransport(t *testing.T) {
 			}
 			stub := func() (Store, error) { return NewMemStore(), nil }
 			result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
-				ScopeRoot:       "/city",
-				Provider:        tc.provider,
-				NativeTransport: NativeTransportOff,
-				OpenBdStore:     stub,
-				OpenFileStore:   stub,
-				OpenExecStore:   stub,
+				ScopeRoot:           "/city",
+				Provider:            tc.provider,
+				NativeTransport:     NativeTransportOff,
+				OpenBdStore:         stub,
+				OpenFileStore:       stub,
+				OpenExecStore:       stub,
+				OpenSQLiteWorkStore: stub,
 				OpenNativeStore: func() (Store, error) {
 					t.Fatal("OpenNativeStore called while native_transport=off")
 					return nil, nil

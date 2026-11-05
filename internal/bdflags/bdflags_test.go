@@ -460,7 +460,7 @@ func TestScanUnknownFlagsMarkdownTableCellIsolatesInvocations(t *testing.T) {
 // dispatch. gc-sling works around the gap by writing --if-assignee=VALUE, which
 // the argv scanner skips entirely; this is the fix that workaround points at.
 func TestUpdateCompareAndSetFlagsArePinned(t *testing.T) {
-	for _, flag := range []string{"--if-assignee", "--if-status"} {
+	for _, flag := range []string{"--if-assignee", "--if-status", "--if-revision"} {
 		if !updateValueFlags()[flag] {
 			t.Errorf("update value flags missing %s", flag)
 		}
@@ -469,4 +469,31 @@ func TestUpdateCompareAndSetFlagsArePinned(t *testing.T) {
 
 func updateValueFlags() map[string]bool {
 	return valueFlagsBySub["update"]
+}
+
+// bd accepts these aliases without listing them in its help, so help
+// discovery cannot find them: the pinned tables must carry them or gc lint
+// reports a valid invocation as an unknown flag.
+func TestScanUnknownFlagsAcceptsBdHiddenAliases(t *testing.T) {
+	cases := []string{
+		`gc bd create "title" --label area/docs`,
+		`gc bd create "title" --body "text"`,
+		`gc bd create "title" -m "text"`,
+		`gc bd create "title" --message "text"`,
+		`gc bd create "title" --description-file notes.md`,
+		`gc bd update <id> --body "text"`,
+		`gc bd update <id> -m "text"`,
+		`gc bd update <id> --message "text"`,
+		`gc bd update <id> --description-file notes.md`,
+		`gc bd update <id> --acceptance-criteria "done when"`,
+		`gc bd close <id> --resolution "done"`,
+		`gc bd close <id> -m "done"`,
+		`gc bd close <id> --message "done"`,
+		`gc bd close <id> --comment "done"`,
+	}
+	for _, line := range cases {
+		if findings := ScanUnknownFlags([]byte(line)); len(findings) != 0 {
+			t.Errorf("ScanUnknownFlags(%q) = %v, want no findings", line, findings)
+		}
+	}
 }

@@ -1789,6 +1789,7 @@ func deepCopyProviderSpec(in ProviderSpec) ProviderSpec {
 	out.EmitsPermissionWarning = copyBoolPtr(in.EmitsPermissionWarning)
 	out.SupportsACP = copyBoolPtr(in.SupportsACP)
 	out.SupportsHooks = copyBoolPtr(in.SupportsHooks)
+	out.ProgramStatus = in.ProgramStatus.clone()
 	return out
 }
 
@@ -2371,6 +2372,10 @@ func adjustPackPatchPaths(patches *PackPatches, topoDir, cityRoot string) {
 		if p.PromptTemplate != nil && *p.PromptTemplate != "" {
 			v := adjustFragmentPath(*p.PromptTemplate, topoDir, cityRoot)
 			p.PromptTemplate = &v
+		}
+		if p.Namepool != nil && *p.Namepool != "" {
+			v := adjustFragmentPath(*p.Namepool, topoDir, cityRoot)
+			p.Namepool = &v
 		}
 		if p.OverlayDir != nil && *p.OverlayDir != "" {
 			v := adjustFragmentPath(*p.OverlayDir, topoDir, cityRoot)

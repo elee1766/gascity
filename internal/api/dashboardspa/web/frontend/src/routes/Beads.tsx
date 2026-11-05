@@ -18,11 +18,11 @@ import { StatusBadge } from '../components/StatusBadge';
 import { useNow } from '../contexts/NowContext';
 import { READ_ONLY_CONTROL_TITLE, ReadOnlyBadge, useReadOnly } from '../contexts/ReadOnlyContext';
 import { buildBeadGraph } from '../lib/beadGraph';
+import { classifyBeads } from '../lib/beadClassify';
 import { resolveRigName, rigNameOptions } from '../lib/rigNames';
 import { useCachedData } from '../hooks/useCachedData';
 import { useGcEventRefresh } from '../hooks/useGcEvents';
 import { useListFilters, type FilterChip } from '../hooks/useListFilters';
-import { beadProject } from '../hooks/projectOf';
 import { listSupervisorAgents, type SupervisorAgent } from '../supervisor/agentReads';
 import { listSupervisorBeads, type SupervisorBead } from '../supervisor/beadReads';
 import { listSupervisorRigs } from '../supervisor/rigReads';
@@ -82,6 +82,9 @@ export function BeadsPage() {
   // four status controls reading as one group while `closed` alone widens
   // the data scope.
   const [showClosed, setShowClosed] = useState(false);
+  // Mail, sessions, nudges, convoys and unlinked workflow steps are hidden by
+  // default; workflow steps linked to a source ticket render on that row.
+  const [showHidden, setShowHidden] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(selectedBeadParam);
   const [closing, setClosing] = useState<SupervisorBead | null>(null);
   const [actionInFlight, setActionInFlight] = useState<string | null>(null);
@@ -94,16 +97,14 @@ export function BeadsPage() {
   const [newRig, setNewRig] = useState('');
   const [newAgent, setNewAgent] = useState('');
 
+  // The rig filter is applied client-side: workflow steps and convoys live in
+  // the city store, so a rig-scoped query would drop the records that group
+  // under that rig's tickets.
   const { data, loading, error, refresh } = useCachedData(
-    `beads:board:${cityCacheKey}:${rigFilter}:${showClosed ? 'all' : 'open'}`,
-    () =>
-      listSupervisorBeads({
-        includeClosed: showClosed,
-        ...(rigFilter === RIG_FILTER_ALL ? {} : { rigFilter }),
-      }),
+    `beads:board:${cityCacheKey}:${showClosed ? 'all' : 'open'}`,
+    () => listSupervisorBeads({ includeClosed: showClosed, includeBookkeeping: true }),
   );
   const rows = useMemo(() => data?.items ?? [], [data]);
-  const totalShown = data?.total ?? 0;
   const upstreamTotal = data?.upstream_total;
   const upstreamFetched = data?.upstream_fetched;
   const fetchLimit = data?.fetch_limit;
@@ -151,12 +152,36 @@ export function BeadsPage() {
     }
   }, [dispatchRigOptions, rigFilter]);
 
-  const filteredRows = rows;
+  const classification = useMemo(() => classifyBeads(rows, rigItems), [rows, rigItems]);
+  const hiddenTotal = classification.hidden.length;
+  const hiddenSummary = useMemo(
+    () =>
+      [...classification.hiddenCounts.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([category, count]) => `${count} ${category}`)
+        .join(', '),
+    [classification],
+  );
+  const filteredRows = useMemo(() => {
+    const visible = showHidden
+      ? [...classification.work, ...classification.hidden]
+      : classification.work;
+    if (rigFilter === RIG_FILTER_ALL) return visible;
+    return visible.filter((bead) => classification.rigOf.get(bead.id) === rigFilter);
+  }, [classification, rigFilter, showHidden]);
+  const rigProjectOf = useCallback(
+    (bead: SupervisorBead) => classification.rigOf.get(bead.id) ?? bead.id,
+    [classification],
+  );
+  const annotationOf = useCallback(
+    (beadId: string) => classification.annotations.get(beadId) ?? null,
+    [classification],
+  );
 
   const filters = useListFilters<SupervisorBead>({
     viewKey: 'beads',
     rows: filteredRows,
-    projectOf: beadProject,
+    projectOf: rigProjectOf,
     searchOf: BEAD_SEARCH_FIELDS,
     chips: BEAD_CHIPS,
   });
@@ -350,8 +375,11 @@ export function BeadsPage() {
   );
 
   const synopsis = useMemo(
-    () => (hasLoadedBoard ? buildSynopsis(filteredRows, totalShown, rigFilter) : 'Loading beads.'),
-    [filteredRows, hasLoadedBoard, totalShown, rigFilter],
+    () =>
+      hasLoadedBoard
+        ? buildSynopsis(filteredRows, filteredRows.length, rigFilter)
+        : 'Loading beads.',
+    [filteredRows, hasLoadedBoard, rigFilter],
   );
 
   const isTruncated =
@@ -473,7 +501,27 @@ export function BeadsPage() {
               </select>
             </label>
           )}
+          {hiddenTotal > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowHidden((prev) => !prev)}
+              aria-pressed={showHidden}
+              title={hiddenSummary}
+              className={`text-label uppercase tracking-wider transition-colors duration-150 ease-out-quart focus-mark rounded-sm ${
+                showHidden
+                  ? 'text-fg font-semibold underline decoration-fg underline-offset-4'
+                  : 'text-fg-muted hover:text-fg'
+              }`}
+            >
+              {showHidden ? 'Hide' : 'Show'} {hiddenTotal} coordination records
+            </button>
+          )}
         </div>
+        {hiddenTotal > 0 && (
+          <p className="text-label text-fg-faint" data-testid="hidden-counts">
+            {showHidden ? 'Showing' : 'Hidden'}: {hiddenSummary}.
+          </p>
+        )}
       </div>
 
       {!hasLoadedBoard && loading ? (
@@ -496,6 +544,7 @@ export function BeadsPage() {
               selectedId={selectedId}
               attentionSeverity={beadAttentionSeverity}
               noteOf={beadNoteOf}
+              annotationOf={annotationOf}
               onSelect={setSelectedId}
             />
           ))}

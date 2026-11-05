@@ -441,12 +441,15 @@ func censusDemandEnv(c *sessionCensus, store beads.Store, rigs map[string]beads.
 // trigger fields resolveTemplateForSessionBeadInfo stamps, and whether a
 // pool seat's unassigned alias defers (poolRuntimeAliasIsDeferredInfo, which
 // the realize path reads off the state, the claim and an alias conflict).
+// The committed launch fingerprint invalidates an older resolution after a
+// fresh launch probes changed files within the same config generation.
 type templateMemoKey struct {
 	ID, Template, CommonName, SessionName, SessionNameExplicit, AgentName, Alias string
 	Origin, ManualMetadata, PoolSlot, NamedIdentity                              string
 	Named, PoolManaged, DependencyOnly                                           bool
 	TriggerBeadID, TriggerStoreRef, Pack                                         string
 	AliasDeferred                                                                bool
+	StartedConfigHash                                                            string
 }
 
 func templateMemoKeyOf(info session.Info) templateMemoKey {
@@ -457,7 +460,8 @@ func templateMemoKeyOf(info session.Info) templateMemoKey {
 		NamedIdentity: info.ConfiguredNamedIdentity, Named: info.ConfiguredNamedSession, PoolManaged: info.PoolManaged,
 		DependencyOnly: info.DependencyOnly,
 		TriggerBeadID:  info.TriggerBeadID, TriggerStoreRef: info.TriggerBeadStoreRef, Pack: info.Pack,
-		AliasDeferred: poolRuntimeAliasIsDeferredInfo(info),
+		AliasDeferred:     poolRuntimeAliasIsDeferredInfo(info),
+		StartedConfigHash: info.StartedConfigHash,
 	}
 }
 
@@ -511,6 +515,17 @@ func newTemplateResolver(bp *agentBuildParams) templateResolver {
 			if !ok || spec.Agent == nil {
 				return templateResolution{Err: fmt.Errorf("configured named session %q not found", identity)}
 			}
+			// A row still stamped with the identity's prior (bare) form is this
+			// same named session awaiting its in-place rename
+			// (gastownhall/gascity#5957): resolve the template under the
+			// requalified identity so the arms' identity write renames the row
+			// instead of re-stamping the stale form — and orphan detection
+			// stops draining a live seat for a config that never went away.
+			if qualified := spec.Named.QualifiedName(); qualified != identity {
+				if qspec, qok := findNamedSessionSpec(cfg, bp.cityName, qualified); qok && session.NamedSessionIdentityIsPriorForm(qspec, identity) {
+					spec, identity = qspec, qualified
+				}
+			}
 			tp, err := resolveConfiguredNamedSessionTemplate(&row, spec, identity, info)
 			return templateResolution{TP: tp, Agent: spec.Agent, Err: err}
 		}
@@ -520,7 +535,7 @@ func newTemplateResolver(bp *agentBuildParams) templateResolver {
 		}
 		if slot, _ := strconv.Atoi(strings.TrimSpace(info.PoolSlot)); (slot > 0 || agent.UsesCanonicalSingletonPoolIdentity()) && info.PoolManaged && !isManualSessionInfoForAgent(info, agent) {
 			// A wanted pool seat: legacy's realize path (realizePoolDesiredSessions).
-			resolveAgent, qualifiedInstance, poolSlot := poolDesiredRequestIdentity(agent, slot)
+			resolveAgent, qualifiedInstance, poolSlot := existingPoolSessionIdentity(agent, slot, sessionBeadAgentNameInfo(info))
 			tp, err := resolveTemplateForSessionBeadInfo(&row, resolveAgent, qualifiedInstance, buildFingerprintExtra(resolveAgent), info)
 			if err == nil {
 				applyPoolInstanceIdentity(&tp, agent, qualifiedInstance, poolSlot, info)
@@ -619,7 +634,11 @@ func (m *gatherMemo) refresh(e gatherEnv, env *reconcileEnv, now time.Time, rows
 	next := make(map[templateMemoKey]templateResolution, len(rows))
 	missed := false
 	for _, row := range rows {
-		if mislabelled[row.Key] || findAgentByTemplate(env.Cfg, resolvedSessionTemplateInfo(row.Info, env.Cfg)) == nil {
+		// A configured named row resolves through its spec, not its stored
+		// template: requalification leaves the template in the identity's
+		// prior form, matching no agent, and skipping the row would leave
+		// A7 without a resolution to rename it under (gastownhall/gascity#5957).
+		if mislabelled[row.Key] || (findSessionAgentByTemplate(env.Cfg, resolvedSessionTemplateInfo(row.Info, env.Cfg)) == nil && !row.Info.ConfiguredNamedSession) {
 			continue
 		}
 		k := templateMemoKeyOf(row.Info)

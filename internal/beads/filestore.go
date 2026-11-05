@@ -387,6 +387,80 @@ func (fs *FileStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+// Claim checks eligibility and persists ownership under one cross-process lock.
+// File claims do not create leases or invent a stale-reclaim policy.
+func (fs *FileStore) Claim(id, actor string) (Bead, bool, error) {
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: empty assignee", id)
+	}
+	return fs.writeAssignment(id, func(b Bead) (*UpdateOpts, bool) {
+		if b.Status != "open" && b.Status != "in_progress" {
+			return nil, false
+		}
+		if owner := strings.TrimSpace(b.Assignee); owner != "" && owner != actor {
+			return nil, false
+		}
+		if b.Assignee == actor && b.Status == "in_progress" {
+			return nil, true
+		}
+		status := "in_progress"
+		return &UpdateOpts{Status: &status, Assignee: &actor}, true
+	})
+}
+
+// TransferIfCurrent changes only an in-progress claim held by the expected owner.
+func (fs *FileStore) TransferIfCurrent(id, from, to string) (bool, error) {
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" {
+		return false, fmt.Errorf("claim transfer requires both owners")
+	}
+	_, moved, err := fs.writeAssignment(id, func(b Bead) (*UpdateOpts, bool) {
+		if b.Status != "in_progress" || b.Assignee != from {
+			return nil, false
+		}
+		if from == to {
+			return nil, true
+		}
+		return &UpdateOpts{Assignee: &to}, true
+	})
+	return moved, err
+}
+
+// writeAssignment keeps the read, ownership predicate and mutation in one
+// flock-held reload/save transaction, including rollback on a failed flush.
+func (fs *FileStore) writeAssignment(id string, change func(Bead) (*UpdateOpts, bool)) (Bead, bool, error) {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	if err := fs.locker.Lock(); err != nil {
+		return Bead{}, false, err
+	}
+	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	if err := fs.reloadFromDisk(); err != nil {
+		return Bead{}, false, err
+	}
+	before, err := fs.MemStore.Get(id)
+	if err != nil {
+		return Bead{}, false, err
+	}
+	opts, won := change(before)
+	if !won {
+		return Bead{}, false, nil
+	}
+	if opts == nil {
+		return before, true, nil
+	}
+	snap := fs.snapshotLocked()
+	if err := fs.MemStore.Update(id, *opts); err != nil {
+		return Bead{}, false, err
+	}
+	if err := fs.save(); err != nil {
+		fs.restoreFrom(snap.seq, snap.beads, snap.deps)
+		return Bead{}, false, err
+	}
+	updated, err := fs.MemStore.Get(id)
+	return updated, err == nil, err
+}
+
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee, while holding the file-store write lock.
 func (fs *FileStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {

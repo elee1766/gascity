@@ -30,6 +30,7 @@ pages.
 | [Command Execution Trust Boundaries](/reference/trust-boundaries) | Which component runs what, and with whose authority |
 | [Exec Session Provider](/reference/exec-session-provider) | The `exec` session runtime provider contract |
 | [Exec Beads Provider](/reference/exec-beads-provider) | The `exec` beads backend contract |
+| [Native SQLite Work Provider](/reference/sqlite-work-provider) | Local city and rig work stores, claims and recovery |
 | [Tmux Agent Slice](/reference/tmux-agent-slice) | `GC_AGENT_SLICE` systemd scoping for tmux panes |
 
 ## Sibling Sections

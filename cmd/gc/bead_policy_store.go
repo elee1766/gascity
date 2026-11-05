@@ -160,9 +160,17 @@ func (s *beadPolicyStore) ReadyContext(ctx context.Context, query ...beads.Ready
 func (s *beadPolicyStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
 	reader, ok := s.Store.(beads.DepMetadataReader)
 	if !ok {
-		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: policy-wrapped store %T exposes no edge-payload read", issueID, dependsOnID, s.Store)
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: policy-wrapped store %T: %w", issueID, dependsOnID, s.Store, beads.ErrDepMetadataUnsupported)
 	}
 	return reader.DepMetadata(issueID, dependsOnID)
+}
+
+// DepMetadataAbsentByProtocol forwards what the inner store declares about its
+// protocol, for the reason DepMetadata is forwarded: the embedded Store
+// interface strips the declaration, and the migration would read a generic
+// exec store under this wrapper as one it cannot ask.
+func (s *beadPolicyStore) DepMetadataAbsentByProtocol() (string, bool) {
+	return beads.DepMetadataAbsent(s.Store)
 }
 
 // Count implements beads.Counter with the same read-tier expansion as List.
@@ -284,6 +292,36 @@ func (s *beadPolicyStore) ReadyOrdered(query beads.ReadyQuery, order beads.Ready
 }
 
 var (
+	_ beads.AbsentBlockedReader = (*beadPolicyStore)(nil)
+	_ beads.AbsentBlockedReader = (*beadPolicyGraphStore)(nil)
+)
+
+// StrandsAbsentTargets answers for the wrapped store
+// (beads.AbsentBlockedReader): the policy layer strands nothing of its own.
+// Over bd/Dolt, which reads an absent target as external, it is false, so a
+// federated reader re-judges every row this store serves instead of taking it
+// as already judged (#8360 review, Finding 1).
+func (s *beadPolicyStore) StrandsAbsentTargets() bool {
+	_, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	return ok
+}
+
+// ReadyBlockedByAbsent forwards the absent-blocker listing
+// (beads.AbsentBlockedReader) at the policy's expanded read tier, exactly as
+// Ready reads. Explicit for the reason DeleteBatch is: the embedded Store
+// interface does not promote optional capabilities, and a silent wrapper would
+// hide from `gc ready` every work row a file- or SQLite-backed ledger strands
+// behind a blocker held in the class binding. An inner store without the
+// listing strands nothing and reports none.
+func (s *beadPolicyStore) ReadyBlockedByAbsent(query beads.ReadyQuery) ([]beads.Bead, error) {
+	reader, ok := beads.ReadyBlockedByAbsentFor(s.Store)
+	if !ok {
+		return nil, nil
+	}
+	return reader.ReadyBlockedByAbsent(expandPolicyReadyQuery(query))
+}
+
+var (
 	_ beads.ChildrenBatchLister = (*beadPolicyStore)(nil)
 	_ beads.ChildrenBatchLister = (*beadPolicyGraphStore)(nil)
 )
@@ -359,6 +397,24 @@ func (r beadPolicyLiveReader) Ready(query ...beads.ReadyQuery) ([]beads.Bead, er
 	return r.LiveReader.Ready(expandPolicyReadyQuery(query...))
 }
 
+// GetExactBatch forwards the wrapped live handle's exact batch read, as the
+// store's own GetExactBatch forwards the store's: the policy layer shapes
+// creation and listing, not exact reads by id. It must be explicit, because the
+// embedded LiveReader interface does not promote it, and beads.GetMany reads
+// every cross-store verdict through it: without it, each by-id read of a
+// controller leg (this policy over a CachingStore over bd or native Dolt) is a
+// Get per id (#8360 review, iteration 2). A live handle without the batch
+// reports beads.ErrExactBatchGetUnsupported, and the caller reads per id.
+func (r beadPolicyLiveReader) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := r.LiveReader.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
+var _ beads.ExactBatchGetter = beadPolicyLiveReader{}
+
 func (s *beadPolicyStore) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
 	return s.List(beads.ListQuery{
 		ParentID:      parentID,
@@ -373,7 +429,10 @@ func (s *beadPolicyStore) ListByLabel(label string, limit int, opts ...beads.Que
 		Label:         label,
 		Limit:         limit,
 		IncludeClosed: beads.HasOpt(opts, beads.IncludeClosed),
-		TierMode:      policyTierFromOpts(opts),
+		// Newest-first like every unwrapped ListByLabel; SortDefault leaves a
+		// caching store's map order, so a limit would keep an arbitrary slice.
+		Sort:     beads.SortCreatedDesc,
+		TierMode: policyTierFromOpts(opts),
 	})
 }
 
@@ -415,13 +474,19 @@ func (s *beadPolicyStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, e
 	return releaser.ReleaseIfCurrent(id, expectedAssignee)
 }
 
-// Claim forwards the two-argument compare-and-swap claim to the wrapped
-// store, the same plain pass-through ReleaseIfCurrent just above uses: the
-// policy layer shapes creation and reads, and has no claim policy of its own
-// to apply, so the inner store's ok/error idiom (a conflict is ok=false with a
-// nil error; a missing bead is ErrNotFound) travels unmodified.
-// beadPolicyGraphStore inherits this via its embedded *beadPolicyStore,
-// matching ConditionalWritesResolveTarget's comment above.
+// AssignmentClaimTarget lets a bound claim handle retain policy-shaped reads
+// while using the underlying adapter's original actor contract.
+func (s *beadPolicyStore) AssignmentClaimTarget() beads.Store { return s.Store }
+
+// CloseStore preserves ownership when a bound handle wraps this policy store.
+func (s *beadPolicyStore) CloseStore() error {
+	if s.borrowed {
+		return nil
+	}
+	return closeBeadStoreHandle(s.Store)
+}
+
+// Claim preserves the explicit-actor capability used by graph-store callers.
 func (s *beadPolicyStore) Claim(id, assignee string) (beads.Bead, bool, error) {
 	claimer, ok := s.Store.(interface {
 		Claim(id, assignee string) (beads.Bead, bool, error)
@@ -430,6 +495,22 @@ func (s *beadPolicyStore) Claim(id, assignee string) (beads.Bead, bool, error) {
 		return beads.Bead{}, false, beads.ErrClaimUnsupported
 	}
 	return claimer.Claim(id, assignee)
+}
+
+func (s *beadPolicyStore) ReclaimStale(id string) (bool, string, error) {
+	reclaimer, ok := s.Store.(beads.StaleAssignmentReclaimer)
+	if !ok {
+		return false, "", beads.ErrReclaimUnsupported
+	}
+	return reclaimer.ReclaimStale(id)
+}
+
+func (s *beadPolicyStore) TransferIfCurrent(id, from, to string) (bool, error) {
+	mover, ok := s.Store.(beads.ConditionalAssigneeTransferer)
+	if !ok {
+		return false, beads.ErrConditionalTransferUnsupported
+	}
+	return mover.TransferIfCurrent(id, from, to)
 }
 
 func (s *beadPolicyStore) policyForCreate(b beads.Bead) (string, string) {
@@ -480,7 +561,7 @@ func (s *beadPolicyGraphStore) ApplyGraphPlan(ctx context.Context, plan *beads.G
 // which decides only store routing. It is the verbatim pre-lift classifier.
 func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {
 	for _, node := range plan.Nodes {
-		if isWispPolicyMetadata(node.Metadata) || hasBeadLabel(node.Labels, "gc:wisp") || hasBeadLabel(node.Labels, "wisp") {
+		if isWispPolicyBead(node.Type, node.Metadata) || hasBeadLabel(node.Labels, "gc:wisp") || hasBeadLabel(node.Labels, "wisp") {
 			return beadPolicyWisp
 		}
 	}
@@ -500,7 +581,7 @@ func policyNameForGraphPlan(plan *beads.GraphApplyPlan) string {
 // keyed on these names, not on the coordination class.
 func policyNameForBead(b beads.Bead) string {
 	switch {
-	case isWispPolicyMetadata(b.Metadata) || b.Type == "wisp" || hasBeadLabel(b.Labels, "gc:wisp") || hasBeadLabel(b.Labels, "wisp"):
+	case isWispPolicyBead(b.Type, b.Metadata) || b.Type == "wisp" || hasBeadLabel(b.Labels, "gc:wisp") || hasBeadLabel(b.Labels, "wisp"):
 		return beadPolicyWisp
 	case hasBeadLabel(b.Labels, labelOrderTracking):
 		return beadPolicyOrderTracking
@@ -519,6 +600,20 @@ func policyNameForBead(b beads.Bead) string {
 
 func isWispPolicyMetadata(metadata map[string]string) bool {
 	return metadata[beadmeta.KindMetadataKey] == beadmeta.KindWisp
+}
+
+// isWispPolicyBead reports whether a bead of beadType with metadata takes the
+// wisp storage policy (the ephemeral tier under bd-1.0.5 semantics).
+//
+// An ATTACHED root-only wisp does not. sling's privatizeAttachedRootOnlyWisp
+// keeps its gc.kind=wisp marker (it is graph class) but types it as a
+// molecule container, and it lives exactly as long as the source bead it is
+// attached to. On the ephemeral tier it would be reapable by bd's own wisp
+// GC (`gc bd mol wisp gc --age`) while that source is still live, so it stays
+// on the durable tier like the molecule container it is. A standalone
+// root-only wisp is an executable task, and keeps the wisp policy.
+func isWispPolicyBead(beadType string, metadata map[string]string) bool {
+	return isWispPolicyMetadata(metadata) && !beads.IsMoleculeType(beadType)
 }
 
 func isWorkflowPolicyMetadata(metadata map[string]string) bool {

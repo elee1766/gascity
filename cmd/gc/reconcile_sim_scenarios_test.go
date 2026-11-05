@@ -184,6 +184,7 @@ func TestSimR17ReplayedEventsWriteNothing(t *testing.T) {
 // the gate stays closed. Under live sessions (R35), unconfirmed, nothing
 // reads gone, however long it lasts.
 func TestSimR34R35ServerGone(t *testing.T) {
+	skipOnSimExecLeaf(t, "server whose death it confirms (runtime.ServerDeathConfirmer)")
 	for _, confirmed := range []bool{false, true} {
 		for _, coldBoot := range []bool{true, false} {
 			s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1"))
@@ -310,6 +311,7 @@ func TestSimStabilityClearsAcrossTime(t *testing.T) {
 // time, and the runtime's death clears it in the same-pass restart's PreWake
 // CAS, which carries the dead-runtime heal.
 func TestSimDetachedAtFollowsTheAttachFact(t *testing.T) {
+	skipOnSimExecLeaf(t, "Full sleep capability, which the detached-at marker tracks")
 	s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1"), gc1Work())
 	s.cfg.Agents[0].SleepAfterIdle = "5m"
 	attach := func(on bool) {
@@ -1810,6 +1812,14 @@ func TestSimRigRestartRevivesTheFloor(t *testing.T) {
 				rows = append(rows, beads.Bead{ID: "gw-" + id, Title: "w", Type: "task", Status: "open", Assignee: id, Metadata: map[string]string{"gc.routed_to": "worker"}})
 			}
 			s := scripted(t, live, rows...)
+			// No-wake cleanup drains only an agent proven idle (SESS-621):
+			// the seats' agents are idle, so the floor's excess drains.
+			s.sp.mu.Lock()
+			s.sp.WaitForIdleErrors = map[string]error{}
+			for i := 1; i <= 4; i++ {
+				s.sp.WaitForIdleErrors[fmt.Sprintf("s-gc-%d", i)] = nil
+			}
+			s.sp.mu.Unlock()
 			if c.floor > 0 {
 				s.cfg.Agents[0].MinActiveSessions = intPtr(c.floor)
 			}

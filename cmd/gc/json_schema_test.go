@@ -278,6 +278,7 @@ func TestJSONSchemaManifestForActionSummaryCommands(t *testing.T) {
 	for _, args := range [][]string{
 		{"convoy", "create", "--json-schema"},
 		{"convoy", "land", "--json-schema"},
+		{"convoy", "release-pair", "--json-schema"},
 		{"mail", "send", "--json-schema"},
 		{"mail", "delete", "--json-schema"},
 	} {

@@ -187,7 +187,7 @@ describe('BeadsPage', () => {
     expect(reopenedQuery?.has('type')).toBe(false);
   });
 
-  it('passes the selected rig to the generated supervisor bead query', async () => {
+  it('filters by rig client-side so city-store workflow records stay grouped', async () => {
     renderPage();
 
     await screen.findByText('Sample bead');
@@ -195,13 +195,10 @@ describe('BeadsPage', () => {
       target: { value: 'east' },
     });
 
-    await waitFor(() => expect(beadQueries.length).toBe(4));
-    // Both legs of the fresh read carry the rig filter.
-    const latestQuery = beadQueries.at(-1);
-    expect(latestQuery?.get('rig')).toBe('east');
-    expect(latestQuery?.has('all')).toBe(false);
-    expect(latestQuery?.has('type')).toBe(false);
-    expect(beadQueries.at(-2)?.get('rig')).toBe('east');
+    expect(await screen.findByText('No beads on east.')).toBeTruthy();
+    expect(screen.queryByText('Sample bead')).toBeNull();
+    expect(beadQueries.length).toBe(2);
+    expect(beadQueries.every((query) => !query.has('rig'))).toBe(true);
   });
 
   it('lists only real rig names in the rig dropdown — no filesystem paths or non-rig dirs', async () => {

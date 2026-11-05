@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -133,6 +134,40 @@ func runSignal(t *testing.T, meta []string, entry func(*selectionEntry), kind st
 		t.Fatal(err)
 	}
 	return s, got
+}
+
+// A no-wake drain must recheck idle when signaling, after its grace period.
+func TestNoWakeSignalRechecksIdle(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		waitErr  error
+		activity time.Duration
+		wantIdle bool
+	}{
+		{"idle", nil, -time.Hour, true},
+		{"busy", errors.New("turn resumed"), -time.Hour, false},
+		{"activity after pass", nil, time.Second, false},
+	} {
+		p, it, store, leaf := admittedBeginOn(t, intentBegunAt(reasonNoWake, time.Minute), func(e *selectionEntry) { e.Desired = desireSleep }, func(w *World) {
+			for id := range w.SleepPolicies {
+				w.SleepPolicies[id] = resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityFull}
+			}
+		})
+		if it.Kind != intentSignalFresh {
+			t.Fatalf("decided %+v, want fresh no-wake signal", it)
+		}
+		leaf.WaitForIdleErrors["s-gc-1"] = tc.waitErr
+		leaf.Activity = map[string]time.Time{"s-gc-1": gatherNow.Add(tc.activity)}
+		s := runTx(context.Background(), p, it, effectSpecs[it.Kind], nil)
+		got, _ := store.Get(it.Key.ID)
+		if !tc.wantIdle {
+			if s.Outcome != settledNoop || s.Cause != causeNotIdle || isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+				t.Fatalf("%s runtime signaled: %+v", tc.name, s)
+			}
+		} else if s.Outcome != settledLanded || !isDrainAckStopPendingInfo(censusRowOf(t, got).Info) {
+			t.Fatalf("idle runtime did not signal: %+v", s)
+		}
+	}
 }
 
 // TestSignalFreshAttachDefers (R26, C8.9). Kills an idle or no-wake-reason
@@ -408,7 +443,7 @@ func TestOperatorResumeClearsAStaleAck(t *testing.T) {
 			}
 		}
 		city := t.TempDir()
-		if err := session.NewManagerWithOptions(store, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
+		if err := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
 			t.Fatalf("running %t: attach: %v", running, err)
 		}
 		got, err := store.Get(b.ID)
@@ -511,7 +546,7 @@ func TestSignalNeverStrandsAnOperatorStart(t *testing.T) {
 				mstore = &attachRaceStore{MemStore: store.(*beads.MemStore), beforeClear: signal}
 			}
 			city := p.World.CityPath
-			err := session.NewManagerWithOptions(mstore, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), it.Key.ID, "claude", runtime.Config{})
+			err := session.NewManagerWithOptions(beadstest.Sessions(mstore), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), it.Key.ID, "claude", runtime.Config{})
 			got, gerr := store.Get(it.Key.ID)
 			if gerr != nil {
 				t.Fatal(gerr)
@@ -551,7 +586,7 @@ func TestOperatorStartClearsARequestBegunBeforeItsLease(t *testing.T) {
 	}
 	sp := &attachRaceSP{Fake: runtime.NewFake(), onIsRunning: begin}
 	city := t.TempDir()
-	if err := session.NewManagerWithOptions(store, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
+	if err := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	got, err := store.Get(b.ID)

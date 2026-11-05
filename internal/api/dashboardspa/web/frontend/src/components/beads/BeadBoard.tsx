@@ -1,6 +1,7 @@
 import { BOARD_COLUMNS, type BeadNode, type BoardColumnId } from '../../lib/beadGraph';
 import { BeadBoardRow } from './BeadBoardRow';
 import type { BadgeSeverity } from '../../attention/compose';
+import type { WorkAnnotation } from '../../lib/beadClassify';
 
 // The Beads board: status columns (kanban) whose rows carry the dependency
 // graph (gascity-dashboard-6frc). Editorial register — columns are
@@ -20,6 +21,8 @@ interface BeadBoardProps {
   attentionSeverity?: (beadId: string) => BadgeSeverity | null;
   /** Liveness note per bead for in-progress rows (gp-6xd); see BeadBoardRow. */
   noteOf?: (beadId: string) => string | null;
+  /** Rig, workflow steps and convoys attached to a work bead. */
+  annotationOf?: (beadId: string) => WorkAnnotation | null;
   onSelect: (beadId: string) => void;
 }
 
@@ -28,6 +31,7 @@ export function BeadBoard({
   selectedId,
   attentionSeverity,
   noteOf,
+  annotationOf,
   onSelect,
 }: BeadBoardProps) {
   return (
@@ -53,6 +57,7 @@ export function BeadBoard({
                     selected={node.bead.id === selectedId}
                     attentionSeverity={attentionSeverity?.(node.bead.id) ?? null}
                     note={noteOf?.(node.bead.id) ?? null}
+                    annotation={annotationOf?.(node.bead.id) ?? null}
                     onSelect={onSelect}
                   />
                 ))}

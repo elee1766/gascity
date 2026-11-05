@@ -167,7 +167,7 @@ func TestConfigDriftResolvedCancels(t *testing.T) {
 	live := runtime.LiveFingerprint(sessionCoreConfigForHashInfo(tp, info)) // A8 leaves a stored live hash alone
 	resolved := func(w *World) {
 		w.Env = &reconcileEnv{Cfg: cfg}
-		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
+		w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(w.Census.Rows[rowKeyOf("gc-1")].Info): {TP: tp}}}
 	}
 	attached := func(w *World) {
 		w.Observed = map[rowKey]rowObservation{rowKeyOf("gc-1"): {Liveness: livenessAlive, Attached: true}}
@@ -324,7 +324,10 @@ func TestNoDrainOnKeepOrUnknownLiveness(t *testing.T) {
 // grace guards only the undesired (orphaned, suspended) begin.
 func TestINC003IsDrainOnly(t *testing.T) {
 	sleep := func(e *selectionEntry) { e.Desired = desireSleep }
-	if it, _ := decideDrain(t, wokeAt(-time.Minute), sleep); it.Kind != intentDrainBeginFresh || it.Reason != decideDrainBegin+reasonNoWake {
+	policy := func(w *World) {
+		w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Class: config.SessionSleepNonInteractive}}
+	}
+	if it, _ := decideDrain(t, wokeAt(-time.Minute), sleep, policy); it.Kind != intentDrainBeginFresh || it.Reason != decideDrainBegin+reasonNoWake {
 		t.Fatalf("Sleep woken 1m ago: %+v, want the no-wake-reason begin", it)
 	}
 }
@@ -337,6 +340,22 @@ func TestWokenRowClearsIdleStopPending(t *testing.T) {
 	it, _ := decideDrain(t, []string{"sleep_intent", sleepIntentIdle}, wake)
 	if w := it.folded(); it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(w) != 1 || w["sleep_intent"] != "" || !it.Class.Has("sleep_intent") {
 		t.Fatalf("%+v, want the sleep_intent clear alone", it)
+	}
+}
+
+// TestWorkKeptRowClearsIdleStopPending (SESS-616; #8416 review N2). Kills a
+// leftover legacy idle-stop-pending mark surviving on a row v2 keeps running
+// for its work: no drain of the row runs, so the idle stop never ends, and
+// the mark holds the work ladder's gate on the very claim that keeps the
+// row, with no signal. A kept row without the mark is held as before.
+func TestWorkKeptRowClearsIdleStopPending(t *testing.T) {
+	kept := func(e *selectionEntry) { undesired(drainOrphaned)(e); e.OpenWork = &assignedWorkView{BeadID: "w"} }
+	if it, _ := decideDrain(t, nil, kept); it.Kind != "" || it.Reason != decideDrainWorkKept {
+		t.Fatalf("%+v, want the row kept", it)
+	}
+	it, _ := decideDrain(t, []string{"sleep_intent", sleepIntentIdle}, kept)
+	if w := it.folded(); it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(w) != 1 || w["sleep_intent"] != "" || !it.Class.Has("sleep_intent") {
+		t.Fatalf("with idle-stop-pending: %+v, want the sleep_intent clear alone", it)
 	}
 }
 
@@ -357,24 +376,27 @@ func TestEmptyGenerationDrainsAtZero(t *testing.T) {
 // interactive one only with Full sleep capability, and a row with no
 // resolved policy never.
 func TestIdleBeginGates(t *testing.T) {
-	idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reasonIdleSleep }
-	for _, c := range []struct {
-		name   string
-		policy *resolvedSessionSleepPolicy
-		begins bool
-	}{
-		{"no policy", nil, false},
-		{"non-interactive", &resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive}, true},
-		{"interactive, not Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityDisabled}, false},
-		{"interactive, Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityFull}, true},
-	} {
-		it, _ := decideDrain(t, nil, idle, func(w *World) {
-			if c.policy != nil {
-				w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": *c.policy}
+	for _, reason := range []string{reasonIdleSleep, ""} {
+		idle := func(e *selectionEntry) { e.Desired, e.Reason = desireSleep, reason }
+		for _, c := range []struct {
+			name   string
+			policy *resolvedSessionSleepPolicy
+			begins bool
+		}{
+			{"no policy", nil, false},
+			{"non-interactive", &resolvedSessionSleepPolicy{Class: config.SessionSleepNonInteractive}, true},
+			{"interactive, not Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityDisabled}, false},
+			{"interactive, TimedOnly", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityTimedOnly}, reason == ""},
+			{"interactive, Full", &resolvedSessionSleepPolicy{Class: config.SessionSleepInteractiveResume, Capability: runtime.SessionSleepCapabilityFull}, true},
+		} {
+			it, _ := decideDrain(t, nil, idle, func(w *World) {
+				if c.policy != nil {
+					w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": *c.policy}
+				}
+			})
+			if begins := it.Kind == intentDrainBeginFresh; begins != c.begins || (!begins && it.Reason != decideIdleUnprovable) {
+				t.Errorf("reason=%q %s: %+v, want begin=%v", reason, c.name, it, c.begins)
 			}
-		})
-		if begins := it.Kind == intentDrainBeginFresh; begins != c.begins || (!begins && it.Reason != decideIdleUnprovable) {
-			t.Errorf("%s: %+v, want begin=%v", c.name, it, c.begins)
 		}
 	}
 }
@@ -450,7 +472,9 @@ func TestDrainBeginsUnderHoldOrQuarantineAsLegacy(t *testing.T) {
 		{"live quarantined row", reasonNoWake, quarantined, func(e *selectionEntry) { e.Desired = desireSleep }},
 		{"orphaned row under a hold", drainOrphaned, []string{"held_until", rowAt(time.Minute), "sleep_reason", "user-hold"}, undesired(drainOrphaned)},
 	} {
-		it, _ := decideDrain(t, c.meta, c.entry)
+		it, _ := decideDrain(t, c.meta, c.entry, func(w *World) {
+			w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Class: config.SessionSleepNonInteractive}}
+		})
 		if it.Reason != decideDrainBegin+c.reason || it.Patch[session.DrainIntentReasonKey] != c.reason {
 			t.Errorf("%s: %+v, want the %s begin", c.name, it, c.reason)
 		}
@@ -552,6 +576,11 @@ func TestSignaledStopIsNotA20s(t *testing.T) {
 // fresh begin with no own runtime read is no begin.
 func TestFreshBeginRestsOnTheRuntime(t *testing.T) {
 	sleep := func(e *selectionEntry) { e.Desired = desireSleep }
+	// A no-wake begin needs an idle proof (SESS-621); a non-interactive
+	// session has one by policy, so the rows below state the rest, not it.
+	idleProvable := func(w *World) {
+		w.SleepPolicies = map[string]resolvedSessionSleepPolicy{"gc-1": {Class: config.SessionSleepNonInteractive}}
+	}
 	for _, c := range []struct {
 		name  string
 		entry func(*selectionEntry)
@@ -561,7 +590,7 @@ func TestFreshBeginRestsOnTheRuntime(t *testing.T) {
 		{"orphaned", undesired(drainOrphaned), intentDrainBegin},
 	} {
 		var w *World
-		it, _ := decideDrain(t, nil, c.entry, func(got *World) { w = got })
+		it, _ := decideDrain(t, nil, c.entry, func(got *World) { idleProvable(got); w = got })
 		if it.Kind != c.kind {
 			t.Fatalf("%s: %+v, want a %s", c.name, it, c.kind)
 		}
@@ -569,7 +598,7 @@ func TestFreshBeginRestsOnTheRuntime(t *testing.T) {
 			t.Fatalf("%s: deferred %+v before admission, want it registered", c.name, deferred)
 		}
 	}
-	if it, _ := decideDrain(t, nil, sleep, func(w *World) { w.Obs = nil }); it.Kind != "" {
+	if it, _ := decideDrain(t, nil, sleep, func(w *World) { idleProvable(w); w.Obs = nil }); it.Kind != "" {
 		t.Fatalf("no own runtime read: %+v, want no fresh begin", it)
 	}
 }

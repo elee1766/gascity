@@ -52,7 +52,7 @@ func (e *laneHostEnvFake) setStore(store beads.Store) {
 	defer e.mu.Unlock()
 	e.store = store
 }
-func (e *laneHostEnvFake) SessionProvider() runtime.Provider { return e.f.sp }
+func (e *laneHostEnvFake) SessionProvider() runtime.Provider { return e.f.runtime() }
 func (e *laneHostEnvFake) Config() *config.City              { return e.f.cfg }
 func (e *laneHostEnvFake) CityPath() string                  { return e.f.dir }
 func (e *laneHostEnvFake) Enqueue(keys ...reconcilekey.Key) {
@@ -940,6 +940,7 @@ func TestLaneWorkerNextDelay(t *testing.T) {
 		{"next", lanePassOutcome{res: opjournal.PassResult{Next: laneT0.Add(7 * time.Second)}}, 7 * time.Second, false},
 		{"busy", lanePassOutcome{res: opjournal.PassResult{Busy: true}}, laneBusyFirst, false},
 		{"busy beats a later next", lanePassOutcome{res: opjournal.PassResult{Busy: true, Next: laneT0.Add(time.Minute)}}, laneBusyFirst, false},
+		{"next beats the busy backoff", lanePassOutcome{res: opjournal.PassResult{Busy: true, Next: laneT0.Add(1500 * time.Millisecond)}}, 1500 * time.Millisecond, false},
 		{"quiescent", lanePassOutcome{skipped: true}, laneQuiescentRetry, false},
 		{"wake recorded", lanePassOutcome{res: opjournal.PassResult{Wake: true}, wake: session.WakeRecorded}, laneWakeRecheck, false},
 		{"wake held", lanePassOutcome{res: opjournal.PassResult{Wake: true}, wake: session.WakeHeld}, laneWakeHeldRecheck, false},
@@ -1123,7 +1124,7 @@ func TestStartConversationLaneHostDelivers(t *testing.T) {
 	f.clk.mu.Lock()
 	f.clk.now = time.Now().UTC()
 	f.clk.mu.Unlock()
-	f.cfg.Ops.Authoritative = []string{"message"}
+	f.cfg.Ops.Authoritative = config.OpsKinds("message")
 	st := f.laneStore(t)
 	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
 	cs := &controllerState{cityBeadStore: f.store, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
@@ -1180,7 +1181,7 @@ func TestStartConversationLaneHostReadsStopRequestsByItsLatchedMode(t *testing.T
 		f.clk.mu.Lock()
 		f.clk.now = time.Now().UTC()
 		f.clk.mu.Unlock()
-		f.cfg.Ops.Authoritative = []string{"message"}
+		f.cfg.Ops.Authoritative = config.OpsKinds("message")
 		st := f.laneStore(t)
 		op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
 		cs := &controllerState{cityBeadStore: f.store, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
@@ -1341,7 +1342,7 @@ func TestStartConversationLaneHostRingsFromTheLedgerFeed(t *testing.T) {
 	defer cancel()
 	feeds := newLedgerFeedSet(t.TempDir(), ledgerFeedHooks{})
 	feeds.setWake(newLegacyWake(make(chan struct{}, 1), make(chan struct{}, 1)))
-	att := attachLedgerFeed(ctx, &ledgerFeedRequest{set: feeds, scope: ledgerFeedCityScope, mode: config.BeadsLedgerFeedAuto}, store, true)
+	att := attachLedgerFeed(ctx, &ledgerFeedRequest{set: feeds, scope: ledgerFeedCityScope, mode: config.BeadsLedgerFeedAuto}, store)
 	if att == nil || att.entry.feed == nil {
 		t.Fatalf("no feed attached: %+v", att)
 	}
@@ -1624,6 +1625,66 @@ func TestLaneHostReprobesBusyRuntimeWithoutRows(t *testing.T) {
 	}
 	if s := hh.h.status(f.clk.Now()); s.Reprobes != 2 {
 		t.Fatalf("status = %+v, want two re-probes", s)
+	}
+}
+
+// TestLaneHostBusyBoundaryWakesAtItsDeadline proves a busy keystroke
+// boundary is passed again at its quiescence deadline, not on the next
+// re-probe of the backoff grid: the wait is the sooner of the backoff and
+// the time left to the deadline, and the pass that deadline ends is a full
+// pass that delivers. The worker already waits for the sooner of the backoff
+// and Next; the executor's hint is what makes Next the deadline.
+func TestLaneHostBusyBoundaryWakesAtItsDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		left time.Duration // the time left to the deadline at the first pass
+		// waits are the timers before the pass that delivers, and reprobes
+		// the re-probes among them.
+		waits    []time.Duration
+		reprobes int
+	}{
+		{"inside the backoff", 1500 * time.Millisecond, []time.Duration{1500 * time.Millisecond}, 0},
+		{"past the first re-probe", 3 * time.Second, []time.Duration{laneBusyFirst, time.Second}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t)
+			f.sp.SetActivity(f.name, laneT0.Add(tc.left-defaultNudgePollQuiescence))
+			st := f.laneStore(t)
+			op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
+			hh := newLaneHostHarness(t, f)
+			hh.h.newExec = func(deps laneExecDeps, row laneRow) opjournal.Executor {
+				e := newConversationLaneExec(deps, row)
+				e.now = f.clk.Now
+				e.idle = func(_ nudgeTarget, obs worker.LiveObservation) bool {
+					return obs.LastActivity != nil && f.clk.Now().Sub(*obs.LastActivity) >= defaultNudgePollQuiescence
+				}
+				return e
+			}
+			hh.start()
+			if p := hh.nextPass(t); !p.out.res.Busy {
+				t.Fatalf("first pass = %+v, want busy", p.out.res)
+			}
+			for i, want := range tc.waits {
+				tm := hh.nextTimer(t)
+				if tm.d != want {
+					t.Fatalf("wait %d = %s, want %s", i, tm.d, want)
+				}
+				f.clk.Advance(tm.d)
+				tm.c <- f.clk.Now()
+				if i < len(tc.waits)-1 && !hh.nextReprobe(t) {
+					t.Fatalf("re-probe %d reported a boundary before the deadline", i)
+				}
+			}
+			if p := hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+				t.Fatalf("pass at the deadline = %+v, want the delivery", p.out.res)
+			}
+			if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("op = %+v", got.Outcome)
+			}
+			if s := hh.h.status(f.clk.Now()); s.Reprobes != int64(tc.reprobes) {
+				t.Fatalf("status = %+v, want %d re-probe(s): the deadline wakes a full pass", s, tc.reprobes)
+			}
+		})
 	}
 }
 
@@ -2038,5 +2099,107 @@ func TestLedgerFeedRingsTheLaneHost(t *testing.T) {
 				t.Fatalf("doorbell rang for %q, want %q: the out-of-band row once, the echo never", rung, want)
 			}
 		})
+	}
+}
+
+// TestLaneHostLatchesTheDefaultKinds pins OJ-21 21a's controller half: with
+// [ops] authoritative unset, a lane host over a SQLite sessions store latches
+// message, interrupt and respond (lane-status says kinds_default), and one
+// over a store the default does not cover runs none and stays quiet.
+func TestLaneHostLatchesTheDefaultKinds(t *testing.T) {
+	if kinds, unset := laneHostConfiguredKinds(&config.City{}); kinds != nil || !unset {
+		t.Fatalf("unset config: kinds %v, unset %v; want nil and unset", kinds, unset)
+	}
+	if kinds, unset := laneHostConfiguredKinds(&config.City{Ops: config.OpsConfig{Authoritative: config.OpsKinds()}}); len(kinds) != 0 || unset {
+		t.Fatalf("[]: kinds %v, unset %v; want an explicit empty list", kinds, unset)
+	}
+	if _, unset := laneHostConfiguredKinds(nil); unset {
+		t.Fatal("a nil config serves the default")
+	}
+
+	t.Run("sqlite", func(t *testing.T) {
+		f := newLaneFixtureOver(t, newLaneKindsSQLiteStore(t))
+		hh := newLaneHostHarness(t, f)
+		hh.h.kindsUnset = true
+		hh.start()
+		if got := hh.h.runningKinds(); !slices.Equal(got, laneDefaultKinds) {
+			t.Fatalf("running kinds = %v, want the default %v", got, laneDefaultKinds)
+		}
+		if st := hh.h.status(time.Now()); !st.KindsDefault || st.State != laneHostStateRunning {
+			t.Fatalf("status = %+v, want running with kinds_default", st)
+		}
+		if logs := hh.logLines(); len(logs) != 0 {
+			t.Fatalf("logs = %q, want none with no legacy key set", logs)
+		}
+		// The default delivers: a lane op proposed with nothing listed is
+		// taken and delivered.
+		st := f.laneStore(t)
+		op := f.propose(t, st, f.msg("k-default", opjournal.RolePrompt, "hello"))
+		hh.h.Poke(f.id)
+		if p := hh.nextPass(t); p.out.err != nil || p.out.res.Done != opjournal.DoneAccepted {
+			t.Fatalf("pass = %+v, want accepted", p.out)
+		}
+		if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded {
+			t.Fatalf("op = %+v, want delivered", got.Outcome)
+		}
+	})
+	t.Run("not sqlite", func(t *testing.T) {
+		f := newLaneFixture(t)
+		hh := newLaneHostHarness(t, f)
+		hh.h.kindsUnset = true
+		hh.start()
+		if got := hh.h.runningKinds(); len(got) != 0 {
+			t.Fatalf("running kinds = %v, want none: the store keeps legacy delivery", got)
+		}
+		if st := hh.h.status(time.Now()); st.KindsDefault {
+			t.Fatalf("status = %+v, want no default", st)
+		}
+	})
+	t.Run("incapable store stays off and quiet", func(t *testing.T) {
+		f := newLaneFixture(t)
+		hh := newLaneHostHarness(t, f)
+		hh.h.kindsUnset = true
+		hh.env.setStore(beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) {
+			return nil, errors.New("the bd CLI must not run")
+		}))
+		hh.start()
+		hh.h.wg.Wait()
+		if st := hh.h.status(time.Now()); st.State != laneHostStateOff || len(st.Kinds) != 0 {
+			t.Fatalf("status = %+v, want off with no kinds (no refusal)", st)
+		}
+		if logs := hh.logLines(); len(logs) != 0 {
+			t.Fatalf("logs = %q, want none", logs)
+		}
+	})
+}
+
+// TestExplicitEmptyAuthoritativeRollsBackAndWarns: [ops] authoritative = []
+// over a SQLite sessions store runs no kind on the lane (the one-release
+// rollback) and the host warns, once, that the rollback goes away next
+// release; legacy keys a lane-run city still sets are warned too.
+func TestExplicitEmptyAuthoritativeRollsBackAndWarns(t *testing.T) {
+	f := newLaneFixtureOver(t, newLaneKindsSQLiteStore(t))
+	f.cfg.Ops.Authoritative = config.OpsKinds()
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	if got := hh.h.runningKinds(); len(got) != 0 {
+		t.Fatalf("running kinds = %v, want none under the rollback", got)
+	}
+	logs := hh.logLines()
+	if len(logs) != 1 || !strings.Contains(logs[0], "authoritative = [] keeps message, interrupt and respond on legacy delivery") {
+		t.Fatalf("logs = %q, want the rollback warning once", logs)
+	}
+	hh.h.decide()
+	if again := hh.logLines(); len(again) != 1 {
+		t.Fatalf("logs after a second decide = %q, want the warning only once", again)
+	}
+
+	g := newLaneFixtureOver(t, newLaneKindsSQLiteStore(t))
+	g.cfg.Daemon.NudgeDispatcher = "supervisor"
+	gh := newLaneHostHarness(t, g)
+	gh.h.kindsUnset = true
+	gh.start()
+	if logs := gh.logLines(); len(logs) != 1 || !strings.Contains(logs[0], "[daemon] nudge_dispatcher is deprecated") || strings.Contains(logs[0], "remove it") {
+		t.Fatalf("logs = %q, want the nudge_dispatcher deprecation, without asking for removal", logs)
 	}
 }

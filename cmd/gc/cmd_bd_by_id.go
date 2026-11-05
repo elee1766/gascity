@@ -207,6 +207,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -291,7 +292,10 @@ type bdByIDOp struct {
 	Reason string
 	// Update carries the field and metadata writes of the update verb, already
 	// translated into the object model's own shape.
-	Update beads.UpdateOpts
+	Update        beads.UpdateOpts
+	MatchAssignee *string
+	MatchStatus   *string
+	MatchRevision *int64
 }
 
 // parseBdByIDOp recognizes the by-ID invocations this surface serves. Anything
@@ -397,6 +401,16 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 			set(&op.Update.Description, value)
 		case "--assignee", "-a":
 			set(&op.Update.Assignee, value)
+		case "--if-assignee":
+			set(&op.MatchAssignee, value)
+		case "--if-status":
+			set(&op.MatchStatus, value)
+		case "--if-revision":
+			revision, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || revision <= 0 {
+				return bdByIDOp{}, name, false
+			}
+			op.MatchRevision = &revision
 		case "--type", "-t":
 			set(&op.Update.Type, value)
 		case "--parent":
@@ -435,7 +449,7 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 		// The claim is a compare-and-swap the store owns; bundling other field
 		// writes into it here would either apply them outside that swap or
 		// re-implement it. bd's own `--claim` is likewise its own operation.
-		if bdByIDUpdateWritesFields(op, metadata) {
+		if bdByIDUpdateWritesFields(op, metadata) || op.MatchAssignee != nil || op.MatchStatus != nil || op.MatchRevision != nil {
 			return bdByIDOp{}, "--claim", false
 		}
 		return bdByIDOp{Verb: bdByIDClaim, ID: op.ID, JSON: op.JSON}, "", true
@@ -460,6 +474,7 @@ var bdByIDUpdateValueFlags = map[string]bool{
 	"-d": true, "--assignee": true, "-a": true, "--type": true, "-t": true,
 	"--parent": true, "--priority": true, "-p": true, "--add-label": true,
 	"--remove-label": true, "--set-metadata": true, "--unset-metadata": true,
+	"--if-assignee": true, "--if-status": true, "--if-revision": true,
 }
 
 // bdByIDUpdateUnrepresentable explains the rejection an operator is most likely
@@ -779,6 +794,10 @@ type bdByIDClassDoor struct {
 	// here is released.
 	Store   beads.Store
 	Binding string
+	// Classes are the coordination classes this binding holds. The
+	// class-must-not-flip guard judges a served update against them: a write
+	// that would leave a resident outside every one of them strands it.
+	Classes []coordclass.Class
 	// CityPath is what resolve plans over. The residence probe belongs to
 	// storeref, and storeref reaches this city's bindings by path — so the door
 	// carries the path rather than a second derivation of the binding list.
@@ -846,7 +865,7 @@ func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
 	if err != nil {
 		return bdByIDClassDoor{}, false, fmt.Errorf("projecting the class front door of binding %q: %w", binding.Name, err)
 	}
-	return bdByIDClassDoor{Graph: graph, Store: binding.Store, Binding: binding.Name, CityPath: cityPath}, true, nil
+	return bdByIDClassDoor{Graph: graph, Store: binding.Store, Binding: binding.Name, Classes: binding.Classes, CityPath: cityPath}, true, nil
 }
 
 // resolve asks the open front door whether it owns id.
@@ -941,6 +960,9 @@ func (d bdByIDClassDoor) firstResident(ids []string) (string, error) {
 // unrecognized flag may or may not consume the next token, and a guess here
 // would probe residence for a value rather than a subject.
 func bdByIDMutationSubjects(bdArgs []string) []string {
+	if op, ok := parseBdByIDOp(bdArgs); ok && op.Verb == bdByIDUpdate && (op.MatchAssignee != nil || op.MatchStatus != nil) {
+		return []string{op.ID}
+	}
 	ids, ok, ambiguous := bdMutationWriteIDs(bdArgs)
 	if !ok || ambiguous {
 		return nil
@@ -1290,6 +1312,28 @@ func serveBdByIDResolved(door bdByIDClassDoor, op bdByIDOp, bdArgs []string, rig
 	case bdByIDDepTree:
 		return doBdByIDDepTree(resolution.Graph, resolution.Bead, op, stdout, stderr), true
 	case bdByIDUpdate:
+		// The cross-store edge rule, binding side: a reparent of a binding
+		// resident must name a parent the same binding holds, never a work
+		// bead (a parent-child edge across stores no read resolves).
+		if op.Update.ParentID != nil && strings.TrimSpace(*op.Update.ParentID) != "" {
+			parent := strings.TrimSpace(*op.Update.ParentID)
+			pr, err := door.resolve(parent)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc bd update %s: refused: %v. Nothing was written.\n", op.ID, err) //nolint:errcheck // best-effort stderr
+				return 1, true
+			}
+			if !pr.Found {
+				fmt.Fprintf(stderr, "gc bd update %s: refused: the new parent %s is not in %s, and a parent-child edge across stores is never written. Nothing was written.\n", op.ID, parent, door.bindingName()) //nolint:errcheck // best-effort stderr
+				return 1, true
+			}
+		}
+		// The class-must-not-flip guard, binding side: an update that would
+		// leave the resident a class this binding does not hold — a graph step
+		// whose only graph marker is removed reads as work — strands it here.
+		if flip := coordclass.CheckFlip(resolution.Bead, bdByIDUpdateMutation(op.Update).Apply(resolution.Bead), door.Classes); flip != nil {
+			fmt.Fprintf(stderr, "%s\n", classFlipRefusalText("gc bd update "+op.ID, flip)) //nolint:errcheck // best-effort stderr
+			return 1, true
+		}
 		return doBdByIDUpdate(resolution.Graph, op, door.bindingName(), stdout, stderr), true
 	case bdByIDClose:
 		return doBdByIDClose(resolution.Graph, op, resolution.Bead, door.bindingName(), stdout, stderr), true
@@ -1877,7 +1921,10 @@ const bdByIDDepTreeLooseEdge = "relates-to"
 // differs rather than assume the bead is thin.
 func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr io.Writer) int {
 	if jsonOut {
-		out, err := json.MarshalIndent([]beads.Bead{b}, "", "  ")
+		out, err := json.MarshalIndent([]struct {
+			beads.Bead
+			Revision int64 `json:"revision"`
+		}{{Bead: b, Revision: b.Revision}}, "", "  ")
 		if err != nil {
 			fmt.Fprintf(stderr, "gc bd: rendering %q: %v\n", b.ID, err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1940,6 +1987,18 @@ func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr 
 	return 0
 }
 
+// bdByIDUpdateMutation states a served update's class-relevant fields as the
+// mutation coordclass.CheckFlip judges.
+func bdByIDUpdateMutation(u beads.UpdateOpts) coordclass.Mutation {
+	return coordclass.Mutation{
+		Type:          u.Type,
+		AddLabels:     u.Labels,
+		RemoveLabels:  u.RemoveLabels,
+		SetMetadata:   u.Metadata,
+		UnsetMetadata: u.UnsetMetadata,
+	}
+}
+
 // doBdByIDUpdate applies a field and metadata write through the closed graph
 // contract, then re-reads and renders what the store now holds.
 //
@@ -1971,7 +2030,7 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 			return 1
 		}
 	}
-	if err := graph.Update(op.ID, op.Update); err != nil {
+	if err := updateBdByIDConditionally(graph, op); err != nil {
 		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1981,6 +2040,37 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 		return 1
 	}
 	return printBdByIDBead(updated, op.JSON, binding, stdout, stderr)
+}
+
+func updateBdByIDConditionally(graph storebinding.GraphStore, op bdByIDOp) error {
+	if op.MatchAssignee == nil && op.MatchStatus == nil && op.MatchRevision == nil {
+		return graph.Update(op.ID, op.Update)
+	}
+	if len(op.Update.UnsetMetadata) > 0 {
+		return errors.New("conditional updates cannot unset metadata")
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		current, err := graph.Get(op.ID)
+		if err != nil {
+			return err
+		}
+		if op.MatchRevision != nil && current.Revision != *op.MatchRevision {
+			return fmt.Errorf("revision precondition failed for %s: expected %d, found %d", op.ID, *op.MatchRevision, current.Revision)
+		}
+		if op.MatchAssignee != nil && current.Assignee != *op.MatchAssignee || op.MatchStatus != nil && current.Status != *op.MatchStatus {
+			return nil
+		}
+		err = graph.UpdateIfMatch(op.ID, current.Revision, op.Update)
+		var conflict *beads.PreconditionFailedError
+		if errors.As(err, &conflict) {
+			if op.MatchRevision != nil {
+				return err
+			}
+			continue
+		}
+		return err
+	}
+	return errors.New("conditional recovery update exhausted retry budget")
 }
 
 // doBdByIDClose retires a class-store bead through the closed graph contract.

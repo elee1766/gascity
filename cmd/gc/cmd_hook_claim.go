@@ -606,6 +606,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 	// Retire, before any tier looks at them, the candidates whose workflow has
 	// nothing left to do because its input convoy work is already terminal.
 	candidates = retireDoneWorkflowCandidates(candidates, *opts, *ops, dir, stderr)
+	candidates = dropCanonicalWorkflowRootCandidates(candidates, stderr)
 	if len(candidates) == 0 {
 		return hookClaimResult{}
 	}
@@ -1523,6 +1524,27 @@ func adoptAfterFailedRestamp(beadID, current, target string, verdict hookAdoptio
 		fmt.Fprintf(stderr, "gc hook --claim: not adopting %s: it is held under legacy assignee %q and re-stamping it to %q failed: %v (bd would reject this worker's close/update; recover with: bd update %s --if-assignee %q --if-status in_progress --assignee %q)\n", beadID, current, target, err, beadID, current, target) //nolint:errcheck
 		return false
 	}
+}
+
+// dropCanonicalWorkflowRootCandidates removes graph workflow roots from the
+// claim candidates. A graph.v2 root is controller bookkeeping, not work: a
+// worker that assigned one to itself (bd update <root> --claim) would otherwise
+// be handed it forever as existing_assignment and never reach its real steps.
+// Roots of other contracts (single-agent formulas, legacy run-target roots)
+// are claimable work and are kept.
+func dropCanonicalWorkflowRootCandidates(candidates []beads.Bead, stderr io.Writer) []beads.Bead {
+	kept := candidates[:0:0]
+	for _, candidate := range candidates {
+		if isCanonicalWorkflowRoot(candidate) &&
+			strings.EqualFold(strings.TrimSpace(candidate.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) {
+			if strings.TrimSpace(candidate.Assignee) != "" {
+				fmt.Fprintf(stderr, "gc hook --claim: skipping workflow root %s assigned to %q: roots are not work; release it with gc bd release-if-current\n", candidate.ID, strings.TrimSpace(candidate.Assignee)) //nolint:errcheck
+			}
+			continue
+		}
+		kept = append(kept, candidate)
+	}
+	return kept
 }
 
 func hookClaimExistingAssignment(candidates []beads.Bead, opts hookClaimOptions) (hookClaimJSONResult, beads.Bead, bool) {

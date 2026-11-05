@@ -1404,6 +1404,8 @@ five records, open structural references and session waits against the
 preflight snapshot, refusing on any drift. Reference inventory includes all
 configured work scopes and class bindings. An unavailable, suspended or
 possibly truncated scope refuses the handover rather than being skipped.
+With --include-suspended, suspended rigs' stores are read into the
+inventory instead; reading a suspended bd-owned rig may restart its store.
 
 If a completed developer-to-refinery handoff left the root bound to a
 separate retired developer, name that exact closed session with --root-session.
@@ -1437,6 +1439,7 @@ gc convoy release-pair <source-bead-id> [flags]
 | `--clear-hold` | stringSlice |  | Pre-existing hold label the operator is authorized to clear (repeatable) |
 | `--from` | string |  | Assignee recorded on both source and step (required) |
 | `--handover-id` | string |  | Stable handover identifier (default pair-&lt;source&gt;-&lt;step&gt;) |
+| `--include-suspended` | bool |  | Inventory suspended rigs' stores instead of refusing the handover |
 | `--json` | bool |  | Output JSON |
 | `--manifest` | string |  | Manifest path (default &lt;city&gt;/.gc/handovers/&lt;handover-id&gt;.json) |
 | `--old-session` | string |  | Closed session bead that held the pair (required) |

@@ -285,6 +285,40 @@ func TestReleasePairRefusesUnselectedStoreReferences(t *testing.T) {
 	}
 }
 
+// A suspended rig refuses the inventory unless --include-suspended reads it,
+// and then its references still refuse the handover.
+func TestReleasePairSuspendedRigInventory(t *testing.T) {
+	c := newReleasePairCity(t)
+	cfgPath := filepath.Join(c.dir, "city.toml")
+	cfg, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(c.dir, "asleep")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg = append(cfg, []byte("\n[[rigs]]\nname = \"asleep\"\npath = \""+other+"\"\n")...)
+	if err := os.WriteFile(cfgPath, cfg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.run("--rig", "asleep", "bd", "init")
+	writeSuspension(t, c.dir, `{"rigs":{"asleep":{"suspended":true}}}`)
+
+	if out, errOut, code := c.releasePair(); code != 1 || !strings.Contains(errOut, "--include-suspended") {
+		t.Fatalf("expected suspended-rig refusal, got exit %d: %s %s", code, out, errOut)
+	}
+	if out, errOut, code := c.releasePair("--include-suspended"); code != 0 {
+		t.Fatalf("preflight with --include-suspended: exit %d: %s %s", code, out, errOut)
+	}
+	writeSuspension(t, c.dir, "")
+	ref := c.jsonMap("--rig", "asleep", "bd", "create", "asleep reference", "--assignee", releasePairDeadOwner, "--json")["id"].(string)
+	writeSuspension(t, c.dir, `{"rigs":{"asleep":{"suspended":true}}}`)
+	if out, errOut, code := c.releasePair("--include-suspended"); code != 1 || !strings.Contains(errOut, ref) {
+		t.Fatalf("expected refusal for suspended-rig reference %s, got exit %d: %s %s", ref, code, out, errOut)
+	}
+}
+
 func TestReleasePairRefusesLiveReplacementIdentity(t *testing.T) {
 	for _, key := range []string{"alias", "agent_name", "alias_history"} {
 		for _, late := range []bool{false, true} {

@@ -2372,7 +2372,7 @@ func workflowInputDoneAcross(graph beads.Store, work beads.WorkStore, candidate 
 		if convoy.IsTerminalStatus(m.Status) {
 			continue
 		}
-		if strings.TrimSpace(m.Assignee) != "" && !hookClaimHasIdentity(m.Assignee, identityCandidates) {
+		if strings.TrimSpace(m.Assignee) != "" && !hookClaimHasIdentity(m.Assignee, identityCandidates) && !memberRoutedToWorkflowLane(m, candidate, root) {
 			// A seat that ran a step of this workflow is its own pool worker
 			// (typically dead, its steps reopened), not another lane: the
 			// member was never handed off (sys-pxryan.44).
@@ -2389,6 +2389,23 @@ func workflowInputDoneAcross(graph beads.Store, work beads.WorkStore, candidate 
 		return root.ID, false, nil
 	}
 	return root.ID, true, nil
+}
+
+// memberRoutedToWorkflowLane reports whether member is still routed to the
+// lane the workflow runs in. A member re-routed with its workflow (both carry
+// the same gc.routed_to) and claimed by another seat of that pool was not
+// handed off; only a different route marks another lane.
+func memberRoutedToWorkflowLane(member, candidate, root beads.Bead) bool {
+	route := strings.TrimSpace(member.Metadata[beadmeta.RoutedToMetadataKey])
+	if route == "" {
+		return false
+	}
+	for _, b := range []beads.Bead{candidate, root} {
+		if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == route {
+			return true
+		}
+	}
+	return false
 }
 
 // workflowStepAssignees lists every seat recorded on any step (open or closed)

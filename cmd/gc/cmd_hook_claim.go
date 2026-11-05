@@ -1527,14 +1527,16 @@ func adoptAfterFailedRestamp(beadID, current, target string, verdict hookAdoptio
 }
 
 // dropCanonicalWorkflowRootCandidates removes graph workflow roots from the
-// claim candidates. A canonical root is controller bookkeeping, not work: a
+// claim candidates. A graph.v2 root is controller bookkeeping, not work: a
 // worker that assigned one to itself (bd update <root> --claim) would otherwise
 // be handed it forever as existing_assignment and never reach its real steps.
-// Legacy run-target roots are still claimable work and are kept.
+// Roots of other contracts (single-agent formulas, legacy run-target roots)
+// are claimable work and are kept.
 func dropCanonicalWorkflowRootCandidates(candidates []beads.Bead, stderr io.Writer) []beads.Bead {
 	kept := candidates[:0:0]
 	for _, candidate := range candidates {
-		if isCanonicalWorkflowRoot(candidate) {
+		if isCanonicalWorkflowRoot(candidate) &&
+			strings.EqualFold(strings.TrimSpace(candidate.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) {
 			if strings.TrimSpace(candidate.Assignee) != "" {
 				fmt.Fprintf(stderr, "gc hook --claim: skipping workflow root %s assigned to %q: roots are not work; release it with gc bd release-if-current\n", candidate.ID, strings.TrimSpace(candidate.Assignee)) //nolint:errcheck
 			}

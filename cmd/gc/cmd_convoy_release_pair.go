@@ -56,6 +56,10 @@ type releasePairOptions struct {
 	Apply      bool
 	JSON       bool
 
+	// IncludeSuspended reads suspended rigs' stores into the inventory
+	// instead of refusing; the read may restart a stopped bd-owned scope.
+	IncludeSuspended bool
+
 	RootSession string
 	StepSession string
 }
@@ -142,6 +146,8 @@ five records, open structural references and session waits against the
 preflight snapshot, refusing on any drift. Reference inventory includes all
 configured work scopes and class bindings. An unavailable, suspended or
 possibly truncated scope refuses the handover rather than being skipped.
+With --include-suspended, suspended rigs' stores are read into the
+inventory instead; reading a suspended bd-owned rig may restart its store.
 
 If a completed developer-to-refinery handoff left the root bound to a
 separate retired developer, name that exact closed session with --root-session.
@@ -182,6 +188,7 @@ naming the not-yet-released pairs as siblings.`,
 	cmd.Flags().StringVar(&opts.StopAfter, "stop-after", "", "Stop after this phase ("+strings.Join(releasePairPhases, ", ")+")")
 	cmd.Flags().BoolVar(&opts.Apply, "apply", false, "Perform the handover; without it only the preflight runs")
 	cmd.Flags().BoolVar(&opts.JSON, "json", false, "Output JSON")
+	cmd.Flags().BoolVar(&opts.IncludeSuspended, "include-suspended", false, "Inventory suspended rigs' stores instead of refusing the handover")
 	return cmd
 }
 
@@ -709,8 +716,11 @@ func (r *releasePairRun) inventory(m *releasePairManifest) (releasePairInventory
 	}
 	var inv releasePairInventory
 	candidates, skipped := convoyCheckStoreCandidates(r.cfg, r.cityPath)
+	if r.opts.IncludeSuspended {
+		candidates, skipped = convoyStoreCandidates(r.cfg, r.cityPath, ""), nil // residency:allow handover safety inventories every configured scope, suspended rigs included on explicit request
+	}
 	if len(skipped) != 0 {
-		return inv, fmt.Errorf("cannot inventory suspended rig stores %v; refusing an incomplete handover", skipped)
+		return inv, fmt.Errorf("cannot inventory suspended rig stores %v; refusing an incomplete handover (pass --include-suspended to read them)", skipped)
 	}
 	views := make([]convoyStoreView, 0, len(candidates)+len(coordclass.Classes()))
 	for _, dir := range candidates {

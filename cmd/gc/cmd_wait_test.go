@@ -1513,6 +1513,72 @@ func TestPrepareWaitWakeState_CancelsStaleEpochWaitForClosedSession(t *testing.T
 	}
 }
 
+func TestPrepareWaitWakeState_RebindsDepsWaitToNewEpochOfOpenSession(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":       "worker",
+			"agent_name":         "worker",
+			"continuation_epoch": "2",
+			"state":              string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	dep, err := store.Create(beads.Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("create dep: %v", err)
+	}
+	waitBead, err := store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:" + sessionBead.ID},
+		Metadata: map[string]string{
+			"session_id":       sessionBead.ID,
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStatePending,
+			"dep_ids":          dep.ID,
+			"dep_mode":         "all",
+			"registered_epoch": "1",
+			"nudge_id":         "wait-old-1-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create wait bead: %v", err)
+	}
+
+	if _, err := prepareWaitWakeState(store, time.Now().UTC()); err != nil {
+		t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+	updated, err := store.Get(waitBead.ID)
+	if err != nil {
+		t.Fatalf("store.Get(wait): %v", err)
+	}
+	if updated.Status == "closed" || updated.Metadata["state"] != waitStatePending {
+		t.Fatalf("wait status/state = %q/%q, want open/pending", updated.Status, updated.Metadata["state"])
+	}
+	if got := updated.Metadata["registered_epoch"]; got != "2" {
+		t.Fatalf("registered_epoch = %q, want 2", got)
+	}
+	if got := updated.Metadata["nudge_id"]; got != "" {
+		t.Fatalf("nudge_id = %q, want cleared", got)
+	}
+
+	if err := store.Close(dep.ID); err != nil {
+		t.Fatalf("close dep: %v", err)
+	}
+	readyWaitSet, err := prepareWaitWakeState(store, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("prepareWaitWakeState after dep close: %v", err)
+	}
+	if !readyWaitSet[sessionBead.ID] {
+		t.Fatalf("readyWaitSet = %#v, want session %s ready", readyWaitSet, sessionBead.ID)
+	}
+}
+
 func TestPrepareWaitWakeState_ProcessesOpenSessionWaitsWithoutGlobalWaitList(t *testing.T) {
 	base := beads.NewMemStore()
 	store := waitGlobalListOmitStore{Store: base}

@@ -280,6 +280,17 @@ func (s *Store) MarkWaitReadyForRedelivery(id, nextAttempt string, now time.Time
 	return s.store.SetMetadataBatch(id, batch)
 }
 
+// RebindWaitEpoch moves an open wait to the session's current continuation
+// epoch, keeping its state and delivery attempt. It clears nudge_id so the
+// next delivery derives a nudge id under the new epoch: a nudge queued under
+// the old epoch is fenced off by its continuation epoch.
+func (s *Store) RebindWaitEpoch(id, epoch string) error {
+	return s.store.SetMetadataBatch(id, map[string]string{
+		"registered_epoch": epoch,
+		"nudge_id":         "",
+	})
+}
+
 // SetWaitNudgeID records the shadow wait-nudge id on the wait bead. It emits a
 // single-key SetMetadata (not a batch), byte-identical to the raw single-key
 // write it replaces.

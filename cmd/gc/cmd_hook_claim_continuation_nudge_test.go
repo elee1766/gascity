@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -330,5 +331,37 @@ func TestHookContinuationNudgeEnqueueClosesOnlyOpenedHandle(t *testing.T) {
 				t.Fatalf("nudges-class store closes = %d, want 0: only the opened handle may be closed", classCloses)
 			}
 		})
+	}
+}
+
+// TestHookClaimSkipsSelfAssignedCanonicalWorkflowRoot verifies that a graph
+// workflow root a worker assigned to itself is never served back as
+// existing_assignment, so the hook reaches the session's real step instead.
+func TestHookClaimSkipsSelfAssignedCanonicalWorkflowRoot(t *testing.T) {
+	const slot = "trade/routing.review-1"
+	root := beads.Bead{ID: "root-1", Status: "in_progress", Assignee: slot, Metadata: map[string]string{
+		"gc.kind": "workflow", "gc.formula_contract": "graph.v2", "gc.routed_to": "route-1",
+	}}
+	step := beads.Bead{ID: "step-1", Status: "in_progress", Assignee: slot, Metadata: map[string]string{
+		"gc.kind": "task", "gc.routed_to": "route-1", "gc.root_bead_id": "root-1",
+	}}
+	var enqueued []string
+	ops := buildContinuationNudgeOps([]beads.Bead{root, step}, nil, &enqueued)
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", ".", hookClaimOptions{
+		Assignee: slot, IdentityCandidates: []string{slot}, RouteTargets: []string{"route-1"}, JSON: true,
+	}, ops, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doHookClaim() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	var result hookClaimJSONResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("stdout is not a JSON claim result: %v\n%s", err, stdout.String())
+	}
+	if result.BeadID != "step-1" {
+		t.Fatalf("claimed %q, want step-1; stderr=%s", result.BeadID, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "skipping workflow root root-1") {
+		t.Fatalf("stderr missing root skip notice: %s", stderr.String())
 	}
 }

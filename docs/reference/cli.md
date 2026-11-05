@@ -509,7 +509,10 @@ List beads across all rigs, routed through the supervisor API when
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --assignee, --all, and --format.
+Supports --label, --status, --assignee, --all, --updated-since, and --format.
+--updated-since takes a duration (7d, 12h) or an RFC3339 timestamp and
+keeps beads updated at or after it; with --all it bounds the closed history
+read.
 --format=json prints a JSON array of beads, the same on every route
 for a local city. For a remote city (--context, --city-url/--city-name, GC_CITY_URL,
 GC_CITY_CONTEXT, or the context selected by gc context use) it prints
@@ -550,6 +553,7 @@ gc beads list [flags]
 gc beads list
 gc beads list --label ready-to-build
 gc beads list --status open --format=json
+gc beads list --all --updated-since 7d --format=json
 gc beads list --assignee city.agent-a --status in_progress
 ```
 
@@ -560,6 +564,7 @@ gc beads list --assignee city.agent-a --status in_progress
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
+| `--updated-since` | string |  | only beads updated within this duration (e.g. 7d, 12h) or since this RFC3339 timestamp |
 
 ## gc beads metadata-cas
 

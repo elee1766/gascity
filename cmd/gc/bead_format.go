@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -47,6 +48,9 @@ type beadFilters struct {
 	// "what work is assigned to me anywhere in town" in one command (ga-rp4k).
 	assignee string
 	all      bool
+	// updatedSince, when non-zero, keeps beads whose UpdatedAt (CreatedAt when
+	// unset) is at or after it.
+	updatedSince time.Time
 }
 
 // parseBeadFilters extracts --label, --status, --assignee, and --all from args,
@@ -84,22 +88,28 @@ func parseBeadFilters(args []string) (beadFilters, []string) {
 
 // filterBeads returns beads matching the given filters. Empty filter fields
 // match everything. A filter that matches nothing returns an empty, non-nil
-// slice, so JSON output prints [] as the direct store read does.
+// slice, so JSON output prints [] as the direct store read does. updatedSince
+// is re-applied here because a supervisor that predates the updated_since
+// query parameter ignores it.
 //
 // The empty-filter fast path must name every filter field: omitting one makes
 // that filter silently match everything when it is the ONLY filter supplied
 // (`gc beads list --assignee=X` with no --status/--label), which reads as "this
 // agent owns every bead in town" rather than a filtered listing.
 func filterBeads(bs []beads.Bead, f beadFilters) []beads.Bead {
-	if f.label == "" && f.status == "" && f.assignee == "" {
+	if f.label == "" && f.status == "" && f.assignee == "" && f.updatedSince.IsZero() {
 		return bs
 	}
+	q := beads.ListQuery{UpdatedSince: f.updatedSince, IncludeClosed: true}
 	out := make([]beads.Bead, 0, len(bs))
 	for _, b := range bs {
 		if f.status != "" && b.Status != f.status {
 			continue
 		}
 		if f.assignee != "" && b.Assignee != f.assignee {
+			continue
+		}
+		if !f.updatedSince.IsZero() && !q.Matches(b) {
 			continue
 		}
 		if f.label != "" {

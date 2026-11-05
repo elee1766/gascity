@@ -1586,6 +1586,10 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 		where = append(where, "COALESCE(NULLIF(b.updated_at, 0), b.created_at) < ?")
 		args = append(args, q.UpdatedBefore.UnixNano())
 	}
+	if !q.UpdatedSince.IsZero() {
+		where = append(where, "COALESCE(NULLIF(b.updated_at, 0), b.created_at) >= ?")
+		args = append(args, q.UpdatedSince.UnixNano())
+	}
 	if q.Label != "" {
 		where = append(where, "EXISTS (SELECT 1 FROM labels l WHERE l.bead_id=b.id AND l.label=?)")
 		args = append(args, q.Label)

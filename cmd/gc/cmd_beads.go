@@ -6,6 +6,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -43,8 +44,8 @@ API with transparent fallback to direct bd reads.`,
 
 func newBeadsListCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
-		label, status, assignee, format string
-		all                             bool
+		label, status, assignee, format, updatedSince string
+		all                                           bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -53,7 +54,10 @@ func newBeadsListCmd(stdout, stderr io.Writer) *cobra.Command {
 the controller is alive and falling back to a direct multi-store read
 otherwise.
 
-Supports --label, --status, --assignee, --all, and --format.
+Supports --label, --status, --assignee, --all, --updated-since, and --format.
+--updated-since takes a duration (7d, 12h) or an RFC3339 timestamp and
+keeps beads updated at or after it; with --all it bounds the closed history
+read.
 --format=json prints a JSON array of beads, the same on every route
 for a local city. For a remote city (--context, --city-url/--city-name, GC_CITY_URL,
 GC_CITY_CONTEXT, or the context selected by gc context use) it prints
@@ -86,10 +90,16 @@ actually assigned under.`,
 		Example: `  gc beads list
   gc beads list --label ready-to-build
   gc beads list --status open --format=json
+  gc beads list --all --updated-since 7d --format=json
   gc beads list --assignee city.agent-a --status in_progress`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdBeadsList(format, beadFilters{label: label, status: status, assignee: assignee, all: all}, stdout, stderr) != 0 {
+			since, err := parseTimeFlag(updatedSince, time.Now())
+			if err != nil {
+				fmt.Fprintf(stderr, "gc beads list: --updated-since: %v\n", err) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if cmdBeadsList(format, beadFilters{label: label, status: status, assignee: assignee, all: all, updatedSince: since}, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -99,6 +109,7 @@ actually assigned under.`,
 	cmd.Flags().StringVar(&status, "status", "", "filter to beads in this status")
 	cmd.Flags().StringVar(&assignee, "assignee", "", "filter to beads whose stored assignee matches this string exactly (across every rig and the city)")
 	cmd.Flags().BoolVar(&all, "all", false, "include closed beads (default: all nonclosed statuses)")
+	cmd.Flags().StringVar(&updatedSince, "updated-since", "", "only beads updated within this duration (e.g. 7d, 12h) or since this RFC3339 timestamp")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	return cmd
 }
@@ -199,9 +210,10 @@ func routeBeadsList(cityPath string, c *api.Client, nilReason, format string, fi
 		func() error {
 			var err error
 			cr, err = c.ListBeads(api.ListBeadsOpts{
-				Label:  filters.label,
-				Status: filters.status,
-				All:    filters.all,
+				Label:        filters.label,
+				Status:       filters.status,
+				All:          filters.all,
+				UpdatedSince: filters.updatedSince,
 			})
 			if err != nil {
 				return err
@@ -431,6 +443,7 @@ func collectBeadsAcrossStores(stores []convoyStoreView, filters beadFilters) ([]
 		Status:        filters.status,
 		Assignee:      filters.assignee,
 		IncludeClosed: filters.all,
+		UpdatedSince:  filters.updatedSince,
 		AllowScan:     true,
 	}
 	rows := make([][]beads.Bead, len(stores))

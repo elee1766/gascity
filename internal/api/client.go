@@ -1089,6 +1089,8 @@ type ListBeadsOpts struct {
 	// the same coverage. A positive value stops paginating once reached.
 	Limit int
 	All   bool
+	// UpdatedSince, when non-zero, keeps only beads updated at or after it.
+	UpdatedSince time.Time
 }
 
 // maxBeadDrainPages hard-bounds the cursor-drain loop. The seenCursors guard
@@ -1125,6 +1127,11 @@ func listBeadsParams(opts ListBeadsOpts) *genclient.GetV0CityByCityNameBeadsPara
 	if opts.All {
 		t := true
 		params.All = &t
+	}
+	if !opts.UpdatedSince.IsZero() {
+		// Nano keeps sub-second cutoffs; the stores compare at nanosecond precision.
+		s := opts.UpdatedSince.UTC().Format(time.RFC3339Nano)
+		params.UpdatedSince = &s
 	}
 	return params
 }

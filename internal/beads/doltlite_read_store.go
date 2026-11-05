@@ -959,7 +959,7 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 		// with the Go-side zero-time treatment — so, exactly like SeekAfter
 		// above, a SQL LIMIT taken before that Go re-sort could cut the wrong
 		// prefix. Fetch unbounded whenever a before-filter is active.
-		if !query.CreatedBefore.IsZero() || !query.UpdatedBefore.IsZero() {
+		if !query.CreatedBefore.IsZero() || !query.UpdatedBefore.IsZero() || !query.UpdatedSince.IsZero() {
 			tableLimit = 0
 		}
 		rows, err := s.queryIssueTable(query, tables, extraWhere, extraArgs, tableLimit, orderBy)
@@ -1004,6 +1004,7 @@ func doltliteCanSelectBoundedTopN(query ListQuery, sets []doltliteTableSet, extr
 		len(query.Metadata) == 0 &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
+		query.UpdatedSince.IsZero() &&
 		query.SeekAfter == nil
 }
 
@@ -1361,6 +1362,12 @@ func (s *DoltliteReadStore) buildDoltliteTableQuery(query ListQuery, tables dolt
 		where = append(where, "(julianday(COALESCE(NULLIF(i.updated_at, ''), i.created_at)) < julianday(?) OR julianday(COALESCE(NULLIF(i.updated_at, ''), i.created_at)) IS NULL)")
 		args = append(args, doltliteSQLiteTime(query.UpdatedBefore))
 	}
+	if !query.UpdatedSince.IsZero() {
+		// Same NULL-julianday admission as the before-filters: unparseable rows
+		// reach filterDoltliteBeforeTimes, which stays authoritative.
+		where = append(where, "(julianday(COALESCE(NULLIF(i.updated_at, ''), i.created_at)) >= julianday(?) OR julianday(COALESCE(NULLIF(i.updated_at, ''), i.created_at)) IS NULL)")
+		args = append(args, doltliteSQLiteTime(query.UpdatedSince))
+	}
 	if extraWhere != "" {
 		where = append(where, extraWhere)
 		args = append(args, extraArgs...)
@@ -1520,7 +1527,7 @@ func doltliteSQLiteTime(t time.Time) string {
 }
 
 func filterDoltliteBeforeTimes(rows []Bead, query ListQuery) []Bead {
-	if len(rows) == 0 || (query.CreatedBefore.IsZero() && query.UpdatedBefore.IsZero() && query.SeekAfter == nil) {
+	if len(rows) == 0 || (query.CreatedBefore.IsZero() && query.UpdatedBefore.IsZero() && query.UpdatedSince.IsZero() && query.SeekAfter == nil) {
 		return rows
 	}
 	out := rows[:0]
@@ -1529,6 +1536,9 @@ func filterDoltliteBeforeTimes(rows []Bead, query ListQuery) []Bead {
 			continue
 		}
 		if !query.UpdatedBefore.IsZero() && !beadUpdatedReferenceTime(row).Before(query.UpdatedBefore) {
+			continue
+		}
+		if !query.UpdatedSince.IsZero() && beadUpdatedReferenceTime(row).Before(query.UpdatedSince) {
 			continue
 		}
 		// Exact Go-side seek: the compound (created_at, id) boundary is

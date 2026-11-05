@@ -3488,7 +3488,7 @@ func nativeCreatedLimitPushdown(query ListQuery) int {
 	// runs and silently drop page rows. Fetch the full candidate set for those
 	// shapes, mirroring the sibling gates (doltliteCanSelectBoundedTopN,
 	// exec.go, bdstore canApplyWispsServerLimit).
-	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
+	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || !query.UpdatedSince.IsZero() || len(query.Assignees) > 0 {
 		return 0
 	}
 	switch query.Sort {

@@ -13934,6 +13934,10 @@ export type GetV0CityByCityNameBeadsData = {
          * Include closed beads.
          */
         all?: boolean;
+        /**
+         * Return only beads updated at or after this RFC3339 timestamp (beads with no update time use their creation time).
+         */
+        updated_since?: string;
     };
     url: '/v0/city/{cityName}/beads';
 };

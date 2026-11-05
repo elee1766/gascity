@@ -124,6 +124,10 @@ type ListQuery struct {
 	// Legacy beads with zero UpdatedAt fall back to CreatedAt. Purge callers
 	// using CachingStore must also set Live: true to avoid stale cached timestamps.
 	UpdatedBefore time.Time
+	// UpdatedSince matches beads whose UpdatedAt is at or after this timestamp,
+	// with the same CreatedAt fallback as UpdatedBefore. It bounds closed-history
+	// reads (IncludeClosed) to recent activity.
+	UpdatedSince  time.Time
 	Limit         int
 	IncludeClosed bool
 	AllowScan     bool
@@ -255,6 +259,7 @@ func (q ListQuery) HasFilter() bool {
 		len(q.Metadata) > 0 ||
 		!q.CreatedBefore.IsZero() ||
 		!q.UpdatedBefore.IsZero() ||
+		!q.UpdatedSince.IsZero() ||
 		q.SeekAfter != nil
 }
 
@@ -332,6 +337,9 @@ func (q ListQuery) Matches(b Bead) bool {
 		return false
 	}
 	if !q.UpdatedBefore.IsZero() && !beadUpdatedReferenceTime(b).Before(q.UpdatedBefore) {
+		return false
+	}
+	if !q.UpdatedSince.IsZero() && beadUpdatedReferenceTime(b).Before(q.UpdatedSince) {
 		return false
 	}
 	if q.SeekAfter != nil && !q.SeekAfter.After(b, q.Sort) {

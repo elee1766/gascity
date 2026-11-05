@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -2106,9 +2107,17 @@ func TestListBeadsParams(t *testing.T) {
 	if got.All == nil || !*got.All {
 		t.Errorf("All = %v, want *true", got.All)
 	}
+	since := listBeadsParams(ListBeadsOpts{UpdatedSince: time.Date(2026, 11, 1, 8, 0, 0, 0, time.FixedZone("x", 3600))})
+	if since.UpdatedSince == nil || *since.UpdatedSince != "2026-11-01T07:00:00Z" {
+		t.Errorf("UpdatedSince = %v, want 2026-11-01T07:00:00Z", since.UpdatedSince)
+	}
+	frac := listBeadsParams(ListBeadsOpts{UpdatedSince: time.Date(2026, 11, 1, 8, 0, 0, 900_000_000, time.UTC)})
+	if frac.UpdatedSince == nil || *frac.UpdatedSince != "2026-11-01T08:00:00.9Z" {
+		t.Errorf("UpdatedSince = %v, want 2026-11-01T08:00:00.9Z", frac.UpdatedSince)
+	}
 
 	empty := listBeadsParams(ListBeadsOpts{})
-	if empty.Status != nil || empty.Type != nil || empty.Label != nil || empty.Assignee != nil || empty.Rig != nil || empty.All != nil {
+	if empty.Status != nil || empty.Type != nil || empty.Label != nil || empty.Assignee != nil || empty.Rig != nil || empty.All != nil || empty.UpdatedSince != nil {
 		t.Errorf("empty opts set a non-nil filter: %+v", empty)
 	}
 }

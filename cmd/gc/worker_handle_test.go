@@ -2829,3 +2829,59 @@ func TestAttachmentHoldsClassifiesWithErrorsIs(t *testing.T) {
 		})
 	}
 }
+
+// A dry-run nudge preview runs from any cwd: the liveness probe must resolve
+// a running session's prompt_template against the city, not the process cwd.
+func TestPrintNudgePreviewResolvesPromptTemplateFromCityPath(t *testing.T) {
+	cityDir := t.TempDir()
+	stub := filepath.Join(cityDir, "stub-agent")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(stub): %v", err)
+	}
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+prompt_template = "prompts/worker.md"
+
+[providers.stub]
+command = "`+stub+`"
+`)
+	if err := os.MkdirAll(filepath.Join(cityDir, "prompts"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(prompts): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "prompts", "worker.md"), []byte("You are the worker.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	store = cliSessionStore(store, cfg, cityDir)
+	sp := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)
+	if _, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: stub, WorkDir: t.TempDir(), Provider: "stub", ExtraMeta: map[string]string{"session_origin": "manual"}}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	t.Chdir(t.TempDir())
+
+	var out []string
+	stderr := captureSweepStderr(t, func() {
+		printNudgePreview(func(s string) { out = append(out, s) }, cfg.Agents[0], "test-city", cityDir, sp, store, cfg)
+	})
+	if strings.Contains(stderr, "prompt_template") {
+		t.Fatalf("printNudgePreview resolved prompt_template against cwd: %s", stderr)
+	}
+	if !strings.Contains(strings.Join(out, "\n"), "Currently: running") {
+		t.Fatalf("preview = %q, want running session", out)
+	}
+}

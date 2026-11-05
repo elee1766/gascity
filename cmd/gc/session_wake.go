@@ -806,7 +806,7 @@ func advanceSessionDrainsWithSessionsTraced(
 		}
 
 		// Check if process exited.
-		running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, info.ID)
+		running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, info.ID)
 		if err != nil {
 			if trace != nil {
 				trace.RecordDecision(TraceSiteDrainComplete, TraceReasonCode(ds.reason), TraceOutcomeSkippedLivenessError, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{
@@ -966,7 +966,7 @@ func advanceSessionDrainsWithSessionsTraced(
 			}
 			// Re-probe after stop to confirm process actually exited
 			// before marking metadata as asleep.
-			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, info.ID)
+			running, err := workerSessionTargetRunningWithConfig(cityPath, store, sp, cfg, info.ID)
 			if err != nil {
 				if trace != nil {
 					trace.RecordDecision(TraceSiteDrainTimeout, TraceReasonCode(ds.reason), TraceOutcomeSkippedLivenessError, normalizedSessionTemplateInfo(info, cfg), name, traceRecordPayload{

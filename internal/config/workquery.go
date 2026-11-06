@@ -1178,7 +1178,11 @@ func assignedGraphWorkflowAnchorReadyFunctionScript(topo QueryTopology) string {
 		`}; `
 }
 
-func graphWorkflowAnchorFallbackBeforeFreshPoolScript() string {
+// graphWorkflowAnchorFallbackScript emits the remembered assigned graph.v2
+// root only after the fresh pool tier found nothing. The claim hook never
+// serves a graph.v2 root, so emitting it ahead of fresh routed work left a
+// session holding a stale root with no work (gci-420865).
+func graphWorkflowAnchorFallbackScript() string {
 	return `if [ -n "$gc_assigned_workflow_anchor_json" ]; then ` +
 		`printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; fi; `
 }
@@ -1321,8 +1325,8 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 			poolDemandFirstRowFunctionScript(topo) +
 			assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 			`probe_assigned_graph_anchor_ready "$1"; ` +
-			graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 			`probe_pool_demand "$1"; ` +
+			graphWorkflowAnchorFallbackScript() +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
@@ -1332,9 +1336,9 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 		assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 		`probe_assigned_graph_anchor_ready "$1"; ` +
 		`probe_assigned_graph_anchor_ready "$2"; ` +
-		graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
+		graphWorkflowAnchorFallbackScript() +
 		`printf "[]"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }

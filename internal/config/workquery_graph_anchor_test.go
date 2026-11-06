@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -37,6 +38,29 @@ func TestEffectiveWorkQueryKeepsAssignedGraphWorkflowRootAsFallback(t *testing.T
 
 	if !workQueryOutputIDs(t, out)["workflow-root"] {
 		t.Fatalf("EffectiveWorkQuery() = %q, want workflow anchor fallback", out)
+	}
+}
+
+// TestEffectiveWorkQueryPrefersFreshRoutedWorkOverStaleGraphWorkflowRoot pins
+// gci-420865: a session holding a graph.v2 root with no ready same-root step
+// must still get fresh routed work, since the claim hook skips the root.
+func TestEffectiveWorkQueryPrefersFreshRoutedWorkOverStaleGraphWorkflowRoot(t *testing.T) {
+	a := Agent{Name: "worker", Dir: "hello-world"}
+	fakeBD := strings.Replace(graphWorkflowAnchorFakeBD(false), "  ready)\n    printf '[]'", `  ready)
+    case "$*" in
+      *"--metadata-field gc.root_bead_id="*) printf '[]' ;;
+      *"--metadata-field gc.routed_to=hello-world/worker"*)
+        printf '[{"id":"fresh-step","status":"open","assignee":"","metadata":{"gc.kind":"task","gc.root_bead_id":"other-root","gc.routed_to":"hello-world/worker"}}]' ;;
+      *) printf '[]' ;;
+    esac`, 1)
+	out := runEffectiveWorkQuery(t, a, map[string]string{
+		"GC_SESSION_NAME":   "worker-session",
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, fakeBD)
+
+	ids := workQueryOutputIDs(t, out)
+	if !ids["fresh-step"] || ids["workflow-root"] {
+		t.Fatalf("EffectiveWorkQuery() = %q, want fresh routed step instead of the stale workflow root", out)
 	}
 }
 

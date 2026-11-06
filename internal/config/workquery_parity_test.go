@@ -36,8 +36,8 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 			poolDemandFirstRowFunctionScript(topo) +
 			assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 			`probe_assigned_graph_anchor_ready "$1"; ` +
-			graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 			`probe_pool_demand "$1"; ` +
+			graphWorkflowAnchorFallbackScript() +
 			`printf "[]"`
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
@@ -47,9 +47,9 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 		assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 		`probe_assigned_graph_anchor_ready "$1"; ` +
 		`probe_assigned_graph_anchor_ready "$2"; ` +
-		graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
+		graphWorkflowAnchorFallbackScript() +
 		`printf "[]"`
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }

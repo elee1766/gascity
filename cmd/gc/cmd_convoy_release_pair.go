@@ -439,7 +439,9 @@ func (r *releasePairRun) preflight() (*releasePairManifest, error) {
 		return nil, fmt.Errorf("old session %s belongs to %q, not %q", o.OldSession, firstNonEmpty(session.Alias, session.AgentName), o.From)
 	}
 	for _, b := range []beads.Bead{source, step} {
-		if b.Assignee != o.From {
+		// An owner cleared earlier is accepted only while the record's session
+		// binding still proves the retired session held it.
+		if b.Assignee != o.From && (b.Assignee != "" || !releasePairSessionBound(b)) {
 			return nil, fmt.Errorf("%s is assigned to %q, not %q", b.ID, b.Assignee, o.From)
 		}
 		if b.Status != "open" && b.Status != "in_progress" && b.Status != "blocked" {
@@ -577,7 +579,7 @@ func (r *releasePairRun) verifySiblings(m *releasePairManifest, oldSessionName s
 			return nil, err
 		}
 		for _, b := range []beads.Bead{src, step} {
-			if b.Assignee != m.From {
+			if b.Assignee != m.From && (b.Assignee != "" || !releasePairSessionBound(b)) {
 				return nil, fmt.Errorf("sibling %s is assigned to %q, not %q", b.ID, b.Assignee, m.From)
 			}
 			if b.Status == "closed" {
@@ -666,6 +668,12 @@ func (r *releasePairRun) checkStepSession(step beads.Bead, id, from string) erro
 		}
 	}
 	return nil
+}
+
+// releasePairSessionBound reports whether b still records a session binding.
+func releasePairSessionBound(b beads.Bead) bool {
+	return strings.TrimSpace(b.Metadata[beadmeta.SessionIDMetadataKey]) != "" ||
+		strings.TrimSpace(b.Metadata[beadmeta.SessionNameMetadataKey]) != ""
 }
 
 // releasePairSessionRefsStale refuses a record bound to any session other than

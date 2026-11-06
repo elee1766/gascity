@@ -355,7 +355,7 @@ func TestReleasePairRefusesLiveReplacementIdentity(t *testing.T) {
 
 // The staged source-only release cannot be claimed until the step is released.
 func TestReleasePairStagedHandoverOnSplitStores(t *testing.T) {
-	for _, mode := range []string{"alias", "session_id", "historical_root", "split_session"} {
+	for _, mode := range []string{"alias", "session_id", "historical_root", "split_session", "pre_cleared"} {
 		t.Run(mode, func(t *testing.T) {
 			testReleasePairStagedHandover(t, mode)
 		})
@@ -376,6 +376,13 @@ func testReleasePairStagedHandover(t *testing.T, mode string) {
 	if mode == "split_session" {
 		c.separateStepSession(c.owner)
 	}
+	wantAssignee := c.owner
+	if mode == "pre_cleared" {
+		// An earlier partial release cleared both owners but left the bindings.
+		c.run("bd", "update", c.source, "--assignee", "", "--set-metadata", "gc.session_id="+c.session)
+		c.run("bd", "update", c.step, "--assignee", "")
+		wantAssignee = ""
+	}
 
 	out, errOut, code := c.releasePair("--json")
 	if code != 0 {
@@ -391,7 +398,7 @@ func testReleasePairStagedHandover(t *testing.T, mode string) {
 	if err := json.Unmarshal([]byte(out), &result); err != nil || result.Result != "preflight-verified" || result.SchemaVersion != "1" || !result.OK || result.Command != "convoy.release-pair" || result.Action != "release-pair" {
 		t.Fatalf("JSON dry run result: %s (%v)", out, err)
 	}
-	if row := c.show(c.source); row.Assignee != c.owner || row.Status != "blocked" {
+	if row := c.show(c.source); row.Assignee != wantAssignee || row.Status != "blocked" {
 		t.Fatalf("dry run mutated the source: %+v", row)
 	}
 	if _, err := os.Stat(filepath.Join(c.dir, "handover.json")); !os.IsNotExist(err) {

@@ -10747,6 +10747,54 @@ func TestSelectOrCreatePoolSessionBead_DoesNotRetagDuplicateConcreteSlot(t *test
 	}
 }
 
+// A seat left above a lowered max_active_sessions must not be renumbered onto
+// a slot another open seat still holds: both would share one identity and work
+// dir (gci-479233, trade/routing.review-7 rebound to review-1).
+func TestSelectOrCreatePoolSessionBead_AboveCapacitySeatSkipsHeldSlot(t *testing.T) {
+	seat := func(slot string, state string) beads.Bead {
+		return beads.Bead{
+			ID:     "gc-review-" + slot,
+			Title:  "review-" + slot,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":       "review",
+				"agent_name":     "review-" + slot,
+				"alias":          "review-" + slot,
+				"pool_slot":      slot,
+				"session_name":   "review-" + slot,
+				"pool_managed":   "true",
+				"session_origin": "ephemeral",
+				"state":          state,
+			},
+		}
+	}
+	holder := seat("1", "active")
+	above := seat("7", "asleep")
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "review", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(6)},
+	}}
+	snapshot := newSessionBeadSnapshot([]beads.Bead{holder, above})
+	bp := &agentBuildParams{
+		city:                  cfg,
+		beadStore:             beads.NewMemStore(),
+		sessionBeads:          snapshot,
+		sessionOccupancyInfos: snapshot.OpenInfos(),
+		agents:                cfg.Agents,
+	}
+	preferred := sessiontest.SeedBead(t, above)
+	_, slot, err := selectOrCreatePoolSessionBead(bp, &cfg.Agents[0], "review", &preferred, map[string]bool{}, map[int]bool{})
+	if err != nil {
+		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
+	}
+	if slot == 1 {
+		t.Fatalf("above-capacity seat claimed slot 1, which open session %s holds", holder.ID)
+	}
+	if slot != 2 {
+		t.Fatalf("slot = %d, want 2 (lowest slot no open session holds)", slot)
+	}
+}
+
 func TestSelectOrCreatePoolSessionBead_DoesNotReserveFreshSlotOnCreateError(t *testing.T) {
 	store := &failingSessionBeadCreateStore{MemStore: beads.NewMemStore()}
 	snapshot := &sessionBeadSnapshot{}

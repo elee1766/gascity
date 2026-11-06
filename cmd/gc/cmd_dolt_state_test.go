@@ -2021,10 +2021,10 @@ esac
 	}
 	got := parseDoltStateOutput(t, stdout.String())
 	if got["deleted_inodes"] != "true" {
-		t.Fatalf("deleted_inodes = %q, want true", got["deleted_inodes"])
+		t.Fatalf("deleted_inodes = %q, want true (listener pid %d, still holds deleted path: %t); report:\n%s", got["deleted_inodes"], proc.Process.Pid, processHoldsDeletedPath(proc.Process.Pid, deletedPath), stdout.String())
 	}
 	if got["reusable"] != "false" {
-		t.Fatalf("reusable = %q, want false", got["reusable"])
+		t.Fatalf("reusable = %q, want false; report:\n%s", got["reusable"], stdout.String())
 	}
 }
 

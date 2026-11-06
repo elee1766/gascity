@@ -5580,7 +5580,7 @@ func selectOrPlanPoolSessionBeadAvoiding(
 	if canonical, ok := findReusableCanonicalNonExpandingPoolSessionInfoForRequest(bp, cfgAgent, template, request, decisionTime, used); ok {
 		at, runsElsewhere := elsewhere[canonical.ID]
 		if !runsElsewhere {
-			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, canonical, usedSlots)
+			slot := claimReusedPoolSlotInfo(bp, cfgAgent, canonical, usedSlots)
 			info, err := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, canonical)
 			return info, slot, nil, err
 		}
@@ -5602,7 +5602,7 @@ func selectOrPlanPoolSessionBeadAvoiding(
 				}
 				continue
 			}
-			slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, candidate, usedSlots)
+			slot := claimReusedPoolSlotInfo(bp, cfgAgent, candidate, usedSlots)
 			if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 				continue
 			}
@@ -5620,12 +5620,29 @@ func selectOrPlanPoolSessionBeadAvoiding(
 	if passed.preferred {
 		return selectPreferredPoolSessionInfo(bp, cfgAgent, passed.info, request, usedSlots)
 	}
-	slot := claimDesiredPoolSlotInfo(bp.city, cfgAgent, passed.info, usedSlots)
+	slot := claimReusedPoolSlotInfo(bp, cfgAgent, passed.info, usedSlots)
 	if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return session.Info{}, 0, nil, err
 	}
 	info, normErr := normalizeNonExpandingPoolSessionInfoForSelection(bp, cfgAgent, passed.info)
 	return info, slot, nil, normErr
+}
+
+// claimReusedPoolSlotInfo claims the slot a reused pool session runs in: its
+// persisted in-bounds slot, or, when it has none (for example a slot left
+// above a lowered max_active_sessions), a slot no other open session holds
+// (claimFreshPoolSlotInfo). The used-this-pass map alone would hand it a slot
+// another live seat still holds, giving two sessions one identity and work
+// dir. It returns 0 when no slot is free.
+func claimReusedPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, info session.Info, usedSlots map[int]bool) int {
+	if cfgAgent.UsesCanonicalSingletonPoolIdentity() || existingPoolSlotWithConfigInfo(bp.city, cfgAgent, info) > 0 {
+		return claimDesiredPoolSlotInfo(bp.city, cfgAgent, info, usedSlots)
+	}
+	slot, err := claimFreshPoolSlotInfo(bp, cfgAgent, usedSlots)
+	if err != nil {
+		return 0
+	}
+	return slot
 }
 
 // poolSeatPassedOver is a live seat selectOrPlanPoolSessionBeadAvoiding passed
@@ -5646,13 +5663,12 @@ func selectPreferredPoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent
 		bp.assignedWorkBeads,
 		preferred,
 	)
-	slot := claimPreferredPoolSlotWithConfigInfo(
-		bp.city,
-		cfgAgent,
-		preferred,
-		preserveAboveCapacity,
-		usedSlots,
-	)
+	slot := 0
+	if preserveAboveCapacity && preferredPoolSlotAboveCapacityInfo(bp.city, cfgAgent, preferred) > 0 {
+		slot = claimPreferredPoolSlotWithConfigInfo(bp.city, cfgAgent, preferred, preserveAboveCapacity, usedSlots)
+	} else {
+		slot = claimReusedPoolSlotInfo(bp, cfgAgent, preferred, usedSlots)
+	}
 	if slot == 0 && !cfgAgent.UsesCanonicalSingletonPoolIdentity() {
 		return session.Info{}, 0, nil, fmt.Errorf("pool session %s concrete slot already claimed", preferred.ID)
 	}

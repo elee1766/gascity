@@ -46,7 +46,7 @@ var effectBannedMethods = []string{
 	"CommitStartedIfCurrent",
 	"WakeSession", "RequestWakeUnlessHeld", "ResumeHeld", "OperatorSuspend", "ApplyDisposition", "ApplyDispositionFresh", "ApplySleep", "ApplyLifecycle", "CreateSession", "CreateSessionInfo", "SaveStartupHealthEpisode",
 	"CreateWait", "CancelWait", "CancelWaits", "ExpireWait", "FailWait", "CloseWaitFromNudge", "FailWaitFromNudge",
-	"MarkWaitReady", "MarkWaitReadyForRedelivery", "SetWaitNudgeID", "RetryClosedWait", "ReassignWaits",
+	"MarkWaitReady", "MarkWaitReadyForRedelivery", "SetWaitNudgeID", "RebindWaitEpoch", "RetryClosedWait", "ReassignWaits",
 	"StopUnattendedSession", "StopForCleanup",
 	"SetContentHold", "ContentHoldItem", "ClearContentHold",
 	"MintIncarnation", "ConfirmIncarnation", // the Manager's and legacy's mint: a v2 effect mints in its own CAS section
